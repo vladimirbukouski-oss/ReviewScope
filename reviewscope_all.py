@@ -973,10 +973,7 @@ def infer_probs_remote(
     if not base:
         raise ValueError("infer_url is empty")
     # Allow passing a full endpoint including /infer
-    if base.endswith("/infer"):
-        url = base
-    else:
-        url = base.rstrip("/") + "/infer"
+
 
     headers = {"Content-Type": "application/json"}
     if token:
