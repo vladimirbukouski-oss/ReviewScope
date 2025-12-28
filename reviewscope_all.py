@@ -357,7 +357,7 @@ def wb_parse_nm_id(url_or_id: str) -> int:
     m = re.search(r"(\d{6,})", s)
     if m:
         return int(m.group(1))
-    raise ValueError(f"Р?Рч С?Р?Р?Р? Р?С<С'Р°С%РёС'С? nmId РёР·: {url_or_id}")
+    raise ValueError(f"Не смог распарсить nmId из: {url_or_id}")
 
 
 WB_UPSTREAMS_URL = "https://cdn.wbbasket.ru/api/v3/upstreams"
@@ -385,55 +385,194 @@ def wb_pick_host_by_vol(route_hosts: List[Dict[str, Any]], vol: int) -> Optional
 
 
 def wb_resolve_card_host(s: requests.Session, vol: int, debug: bool = False) -> str:
+    """Resolve which *.wbbasket.ru host stores card.json for a given volume.
+
+    WB регулярно меняет схему upstreams. Вместо жёсткой привязки к одному ключу,
+    пытаемся найти подходящий route_map в нескольких местах.
+    """
     ups = wb_get_upstreams(s, debug=debug)
-    try:
-        hosts = ups["recommend"]["mediabasket_route_map"][0]["hosts"]
-    except Exception:
-        raise RuntimeError("Failed to find mediabasket_route_map in WB upstreams.")
-    host = wb_pick_host_by_vol(hosts, vol)
-    if not host:
-        raise RuntimeError(f"Failed to find WB host for vol={vol} in upstreams.")
-    return host
+
+    # Collect candidate host maps from both "recommend" and "origin" sections.
+    candidates: List[Tuple[str, List[Dict[str, Any]]]] = []
+    for sect in ("recommend", "origin"):
+        sec = ups.get(sect)
+        if not isinstance(sec, dict):
+            continue
+        for key in ("mediabasket_route_map", "basket_route_map"):
+            rm = sec.get(key)
+            if isinstance(rm, list) and rm and isinstance(rm[0], dict):
+                hosts = rm[0].get("hosts")
+                if isinstance(hosts, list) and hosts:
+                    candidates.append((f"{sect}.{key}", hosts))
+
+    # Try to pick a host from any of the candidates.
+    for name, hosts in candidates:
+        host = wb_pick_host_by_vol(hosts, vol)
+        if host:
+            return host
+        if debug:
+            eprint(f"[wb] no host for vol={vol} in {name}")
+
+    # As a very defensive fallback: if vol is above the max known range, return the host
+    # with the largest vol_range_to (better than crashing with a confusing error).
+    max_to: Optional[int] = None
+    max_host: Optional[str] = None
+    for _, hosts in candidates:
+        for h in hosts:
+            try:
+                b = int(h.get("vol_range_to"))
+            except Exception:
+                continue
+            if max_to is None or b > max_to:
+                max_to = b
+                max_host = h.get("host")
+    if max_to is not None and max_host and vol > max_to:
+        if debug:
+            eprint(f"[wb] vol={vol} выше max_range_to={max_to}; fallback host={max_host}")
+        return max_host
+
+    raise RuntimeError(f"Failed to find WB host for vol={vol} in upstreams (no matching route_map).")
+
+
+def wb_try_fetch_card_json_from_hosts(
+    s: requests.Session,
+    nm_id: int,
+    vol: int,
+    part: int,
+    hosts: List[str],
+    debug: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Try to GET card.json from a list of candidate basket hosts (best-effort)."""
+    url_path = f"/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
+    for h in hosts:
+        try:
+            return req_json(
+                s,
+                f"https://{h}{url_path}",
+                tries=1,
+                sleep_base=0.2,
+                timeout=(4.0, 12.0),
+                debug=debug,
+            )
+        except Exception:
+            continue
+    return None
 
 
 def wb_fetch_card_json_via_api(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
-    url = "https://card.wb.ru/cards/v1/detail"
-    param_sets = [
-        {"appType": 1, "curr": "byn", "dest": -59202, "nm": nm_id},
-        {"appType": 1, "curr": "rub", "dest": -1257786, "nm": nm_id},
-        {"nm": nm_id},
+    # Endpoints here are not part of the official seller API, and they change over time.
+    # We therefore try a small set of known variants.
+    attempts: List[Tuple[str, List[Dict[str, Any]]]] = [
+        (
+            "https://card.wb.ru/cards/v4/detail",
+            [
+                {"dest": -1257786, "locale": "ru", "nm": nm_id},
+                {"dest": "-1216601,-115136,-421732,123585595", "locale": "ru", "nm": nm_id},
+            ],
+        ),
+        (
+            "https://card.wb.ru/cards/v2/detail",
+            [
+                {"ab_testing": "false", "appType": 1, "curr": "rub", "dest": -1257786, "spp": 30, "nm": nm_id},
+                {"appType": 1, "curr": "byn", "dest": -59202, "spp": 30, "nm": nm_id},
+            ],
+        ),
+        (
+            "https://card.wb.ru/cards/detail",
+            [
+                {"appType": 1, "curr": "rub", "dest": -1257786, "spp": 30, "nm": nm_id},
+                {"nm": nm_id},
+            ],
+        ),
+        (
+            "https://card.wb.ru/cards/v1/detail",
+            [
+                {"appType": 1, "curr": "rub", "dest": -1257786, "spp": 30, "nm": nm_id},
+                {"nm": nm_id},
+            ],
+        ),
     ]
+
     last_err: Optional[Exception] = None
-    for params in param_sets:
-        try:
-            return req_json(s, url, params=params, tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
-        except Exception as e:
-            last_err = e
+    saw_404 = False
+    for url, param_sets in attempts:
+        for params in param_sets:
+            try:
+                return req_json(s, url, params=params, tries=2, sleep_base=0.25, timeout=(4.0, 15.0), debug=debug)
+            except Exception as e:
+                last_err = e
+                # Heuristic: if every endpoint returns 404, the item is likely removed/hidden.
+                if " 404 " in f" {e} ":
+                    saw_404 = True
+
+    if saw_404:
+        raise RuntimeError(
+            f"WB карточка не найдена (nmId={nm_id}). Все варианты card.wb.ru вернули 404 — возможно товар удалён/скрыт."
+        )
     raise RuntimeError(f"Failed to fetch WB card via API for nmId={nm_id}: {last_err}")
 
 
 def wb_fetch_card_json(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
     vol, part = wb_nm_to_vol_part(nm_id)
+    url_path = f"/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
+
+    # 1) normal path via upstreams route-map
     try:
         host = wb_resolve_card_host(s, vol, debug=debug)
-        url = f"https://{host}/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
-        return req_json(s, url, tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
+        return req_json(s, f"https://{host}{url_path}", tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
     except Exception as e:
         if debug:
-            eprint(f"[wb] card.json fallback due to: {e}")
-        return wb_fetch_card_json_via_api(s, nm_id, debug=debug)
+            eprint(f"[wb] resolve+fetch card.json failed: {e}")
+
+    # 2) defensive path: try all known basket hosts from upstreams (dedup)
+    try:
+        ups = wb_get_upstreams(s, debug=debug)
+        cand: List[str] = []
+        for sect in ("recommend", "origin"):
+            sec = ups.get(sect)
+            if not isinstance(sec, dict):
+                continue
+            rm = sec.get("mediabasket_route_map")
+            if isinstance(rm, list) and rm and isinstance(rm[0], dict):
+                hs = rm[0].get("hosts")
+                if isinstance(hs, list):
+                    for h in hs:
+                        host = h.get("host")
+                        if host:
+                            cand.append(str(host))
+        # stable order, remove duplicates
+        seen: set = set()
+        cand_uniq = [h for h in cand if not (h in seen or seen.add(h))]
+        js = wb_try_fetch_card_json_from_hosts(s, nm_id, vol, part, cand_uniq, debug=debug)
+        if js is not None:
+            return js
+    except Exception as e:
+        if debug:
+            eprint(f"[wb] all-hosts card.json fallback failed: {e}")
+
+    # 3) final fallback: card.wb.ru endpoints
+    return wb_fetch_card_json_via_api(s, nm_id, debug=debug)
 
 
 def wb_extract_imt_id(card_js: Dict[str, Any]) -> int:
-    for k in ("imtId", "imt_id", "imt"):
+    # card.json often has imtId at the root; card.wb.ru variants may expose it as "root".
+    for k in ("imtId", "imt_id", "imt", "root"):
         v = card_js.get(k)
         if v is not None and str(v).isdigit():
             return int(v)
     if isinstance(card_js.get("data"), dict):
         prods = card_js["data"].get("products")
         if isinstance(prods, list) and prods:
-            for k in ("imtId", "imt_id", "imt"):
+            for k in ("imtId", "imt_id", "imt", "root"):
                 v = prods[0].get(k)
+                if v is not None and str(v).isdigit():
+                    return int(v)
+    # v4/detail format: {"products": [...]} (no "data" wrapper)
+    if isinstance(card_js.get("products"), list) and card_js["products"]:
+        p0 = card_js["products"][0]
+        if isinstance(p0, dict):
+            for k in ("imtId", "imt_id", "imt", "root"):
+                v = p0.get(k)
                 if v is not None and str(v).isdigit():
                     return int(v)
     raise RuntimeError("Failed to extract imtId from card.json")
