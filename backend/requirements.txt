@@ -2,7 +2,7 @@
 
 # API Framework
 fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
+uvicorn>=0.24.0
 pydantic>=2.0.0
 
 # HTTP & Async
@@ -15,7 +15,8 @@ numpy>=1.24.0
 pandas>=2.0.0
 
 # ML & NLP
-torch>=2.0.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2
 transformers>=4.35.0
 hnswlib>=0.8.0
 
