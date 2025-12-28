@@ -20,8 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY reviewscope_all.py .
 COPY backend/ ./backend/
 
-# Copy models (WARNING: ~2.2GB - will increase image size)
-COPY models/ ./models/
+# Models are downloaded on startup (see backend/main.py) to keep image small.
 
 # Create data directory
 RUN mkdir -p /app/backend/data
