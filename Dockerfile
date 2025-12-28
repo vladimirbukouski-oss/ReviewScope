@@ -8,7 +8,9 @@ WORKDIR /app
 COPY backend/requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_CACHE_DIR=1
+RUN pip install --prefer-binary -r requirements.txt
 
 # Copy application code
 COPY reviewscope_all.py .
