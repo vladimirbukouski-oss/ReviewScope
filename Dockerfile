@@ -4,6 +4,12 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Build deps (needed for hnswlib)
+RUN apt-get update && apt-get install -y \
+    g++ \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements
 COPY backend/requirements.txt .
 
