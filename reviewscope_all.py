@@ -964,22 +964,29 @@ def infer_probs_remote(
     """
     Remote inference for BOTH heads (sentiment 3-class, rating 5-class).
 
-    Expects POST {infer_url}/infer with JSON:
-      {"texts":[...], "max_len":192, "batch":64}
+    Supports both endpoint styles:
+      - POST {infer_url}         (Modal часто так работает)
+      - POST {infer_url}/infer   (если ты сам так роут повесил)
+    Body JSON:
+      {"texts":[...], "max_len":192, "batch":64, "auth":"...optional..."}
     Returns JSON:
       {"sent_probs":[[...3...],...], "rate_probs":[[...5...],...]}
     """
     base = (infer_url or "").strip()
     if not base:
         raise ValueError("infer_url is empty")
-    # Allow passing a full endpoint including /infer
 
+    base = base.rstrip("/")
+    if base.endswith("/infer"):
+        # если передали полный путь, пробуем его и корень
+        candidates = [base, base[:-5]]
+    else:
+        # по умолчанию сначала корень (как у тебя в PowerShell), потом /infer
+        candidates = [base, base + "/infer"]
 
     headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
 
-    # Chunking to avoid huge JSON bodies (1000 reviews can be big)
+    # Chunking to avoid huge JSON bodies
     try:
         chunk_n = int(os.getenv("RS_REMOTE_CHUNK", "256"))
         if chunk_n <= 0:
@@ -994,22 +1001,56 @@ def infer_probs_remote(
         part = texts[i : i + chunk_n]
         payload = {"texts": part, "max_len": int(max_len), "batch": int(batch)}
         if token:
+            # у тебя сервис принимает auth в JSON (как в PS примерe)
             payload["auth"] = token
-        r = requests.post(url, json=payload, headers=headers, timeout=timeout_s)
-        if r.status_code == 401 or r.status_code == 403:
-            raise RuntimeError(f"Remote infer auth failed ({r.status_code}). Check RS_INFER_TOKEN / server token.")
-        r.raise_for_status()
-        data = r.json()
-        sp = data.get("sent_probs")
-        rp = data.get("rate_probs")
-        if not isinstance(sp, list) or not isinstance(rp, list):
-            raise RuntimeError(f"Remote infer bad response keys: {list(data.keys())}")
-        if len(sp) != len(part) or len(rp) != len(part):
-            raise RuntimeError(f"Remote infer length mismatch: got sent={len(sp)} rate={len(rp)} expected={len(part)}")
-        sent_all.extend(sp)
-        rate_all.extend(rp)
+
+        last_err: Optional[Exception] = None
+        last_resp_text: str = ""
+
+        ok = False
+        for u in candidates:
+            try:
+                r = requests.post(u, json=payload, headers=headers, timeout=timeout_s)
+
+                # если эндпойнт не тот — пробуем следующий кандидат
+                if r.status_code in (404, 405):
+                    last_resp_text = (r.text or "")[:200]
+                    continue
+
+                if r.status_code in (401, 403):
+                    raise RuntimeError(
+                        f"Remote infer auth failed ({r.status_code}). "
+                        f"Check RS_INFER_TOKEN / server token. Body: {(r.text or '')[:200]}"
+                    )
+
+                r.raise_for_status()
+                data = r.json()
+
+                sp = data.get("sent_probs")
+                rp = data.get("rate_probs")
+                if not isinstance(sp, list) or not isinstance(rp, list):
+                    raise RuntimeError(f"Remote infer bad response keys: {list(data.keys())}")
+
+                if len(sp) != len(part) or len(rp) != len(part):
+                    raise RuntimeError(
+                        f"Remote infer length mismatch: got sent={len(sp)} rate={len(rp)} expected={len(part)}"
+                    )
+
+                sent_all.extend(sp)
+                rate_all.extend(rp)
+                ok = True
+                break
+            except Exception as e:
+                last_err = e
+
+        if not ok:
+            raise RuntimeError(
+                f"Remote infer failed for both endpoints: {candidates}. "
+                f"Last error: {last_err}. Last 404/405 body: {last_resp_text}"
+            )
 
     return sent_all, rate_all
+
 
 
 
