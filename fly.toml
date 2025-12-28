@@ -1,0 +1,39 @@
+app = "reviewscope-production"
+primary_region = "ams"  # Amsterdam (или другой регион)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8888"
+  DEVICE = "cpu"
+  LLM_PROVIDER = "openai"
+  LLM_MODEL = "gpt-4o-mini"
+  EMB_MODEL = "text-embedding-3-small"
+  SENT_MODEL = "/app/models/sentiment/final"
+  RATE_MODEL = "/app/models/rating/final"
+
+[http_service]
+  internal_port = 8888
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0  # Экономит деньги
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 2048  # 2GB RAM
+
+# Persistent volume для моделей (3GB бесплатно!)
+[[mounts]]
+  source = "reviewscope_models"
+  destination = "/app/models"
+  initial_size = "3gb"

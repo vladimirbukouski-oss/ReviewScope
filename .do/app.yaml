@@ -1,0 +1,51 @@
+name: reviewscope-production
+
+services:
+  - name: backend
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: YOUR_USERNAME/reviewscope-production
+      branch: main
+      deploy_on_push: true
+
+    instance_count: 1
+    instance_size_slug: basic-xs  # $5/мес, 1GB RAM
+
+    http_port: 8888
+
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 60
+      period_seconds: 30
+      timeout_seconds: 10
+      success_threshold: 1
+      failure_threshold: 3
+
+    envs:
+      - key: PORT
+        value: "8888"
+      - key: DEVICE
+        value: "cpu"
+      - key: LLM_PROVIDER
+        value: "openai"
+      - key: LLM_MODEL
+        value: "gpt-4o-mini"
+      - key: EMB_MODEL
+        value: "text-embedding-3-small"
+      - key: SENT_MODEL
+        value: "./models/sentiment/final"
+      - key: RATE_MODEL
+        value: "./models/rating/final"
+      - key: OPENAI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+
+    routes:
+      - path: /
+
+# Spaces для хранения моделей (опционально)
+# databases:
+#   - name: reviewscope-models
+#     engine: SPACES
+#     version: "1"

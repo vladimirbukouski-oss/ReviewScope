@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: reviewscope-api
+    runtime: docker
+    repo: https://github.com/YOUR_USERNAME/reviewscope-production
+    branch: main
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        value: openai
+      - key: LLM_MODEL
+        value: gpt-4o-mini
+      - key: EMB_MODEL
+        value: text-embedding-3-small
+      - key: DEVICE
+        value: cpu
+      - key: SENT_MODEL
+        value: ./models/sentiment/final
+      - key: RATE_MODEL
+        value: ./models/rating/final
+    healthCheckPath: /health
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - backend/**
+        - reviewscope_all.py
+        - Dockerfile
+    plan: starter  # Free tier
+    region: oregon
