@@ -951,6 +951,71 @@ def infer_probs(model, tok, texts: List[str], device: torch.device, max_len: int
     return out
 
 
+
+
+def infer_probs_remote(
+    texts: List[str],
+    max_len: int,
+    batch: int,
+    infer_url: str,
+    token: Optional[str] = None,
+    timeout_s: float = 180.0,
+) -> Tuple[List[List[float]], List[List[float]]]:
+    """
+    Remote inference for BOTH heads (sentiment 3-class, rating 5-class).
+
+    Expects POST {infer_url}/infer with JSON:
+      {"texts":[...], "max_len":192, "batch":64}
+    Returns JSON:
+      {"sent_probs":[[...3...],...], "rate_probs":[[...5...],...]}
+    """
+    base = (infer_url or "").strip()
+    if not base:
+        raise ValueError("infer_url is empty")
+    # Allow passing a full endpoint including /infer
+    if base.endswith("/infer"):
+        url = base
+    else:
+        url = base.rstrip("/") + "/infer"
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    # Chunking to avoid huge JSON bodies (1000 reviews can be big)
+    try:
+        chunk_n = int(os.getenv("RS_REMOTE_CHUNK", "256"))
+        if chunk_n <= 0:
+            chunk_n = 256
+    except Exception:
+        chunk_n = 256
+
+    sent_all: List[List[float]] = []
+    rate_all: List[List[float]] = []
+
+    for i in range(0, len(texts), chunk_n):
+        part = texts[i : i + chunk_n]
+        payload = {"texts": part, "max_len": int(max_len), "batch": int(batch)}
+        if token:
+            payload["auth"] = token
+        r = requests.post(url, json=payload, headers=headers, timeout=timeout_s)
+        if r.status_code == 401 or r.status_code == 403:
+            raise RuntimeError(f"Remote infer auth failed ({r.status_code}). Check RS_INFER_TOKEN / server token.")
+        r.raise_for_status()
+        data = r.json()
+        sp = data.get("sent_probs")
+        rp = data.get("rate_probs")
+        if not isinstance(sp, list) or not isinstance(rp, list):
+            raise RuntimeError(f"Remote infer bad response keys: {list(data.keys())}")
+        if len(sp) != len(part) or len(rp) != len(part):
+            raise RuntimeError(f"Remote infer length mismatch: got sent={len(sp)} rate={len(rp)} expected={len(part)}")
+        sent_all.extend(sp)
+        rate_all.extend(rp)
+
+    return sent_all, rate_all
+
+
+
 def stage3_build_bundle(
     url: str,
     out_dir: Path,
@@ -1073,18 +1138,41 @@ def stage3_build_bundle(
         except Exception:
             pass
 
-    eprint("[stage3] loading sentiment tokenizer...")
-    sent_tok = load_tokenizer(sent_model_dir)
-    eprint("[stage3] loading sentiment model...")
-    sent_model = load_model(sent_model_dir, device)
+    # Optional: run model inference remotely (GPU microservice).
+    # Set RS_INFER_URL (or INFER_URL / INFER_REMOTE_URL) to enable.
+    infer_url = (os.getenv("RS_INFER_URL") or os.getenv("INFER_URL") or os.getenv("INFER_REMOTE_URL") or "").strip()
+    infer_token = (os.getenv("RS_INFER_TOKEN") or os.getenv("INFER_TOKEN") or "").strip() or None
 
-    eprint("[stage3] loading rating tokenizer...")
-    rate_tok = load_tokenizer(rate_model_dir)
-    eprint("[stage3] loading rating model...")
-    rate_model = load_model(rate_model_dir, device)
+    sent_probs: List[List[float]]
+    rate_probs: List[List[float]]
 
-    sent_probs = infer_probs(sent_model, sent_tok, texts, device, max_len, batch, desc="sentiment")  # 3
-    rate_probs = infer_probs(rate_model, rate_tok, texts, device, max_len, batch, desc="rating")  # 5
+    if infer_url:
+        eprint(f"[stage3] remote inference enabled: {infer_url}")
+        try:
+            sent_probs, rate_probs = infer_probs_remote(
+                texts=texts,
+                max_len=max_len,
+                batch=batch,
+                infer_url=infer_url,
+                token=infer_token,
+                timeout_s=float(os.getenv("RS_REMOTE_TIMEOUT_S", "180")),
+            )
+        except Exception as ex:
+            eprint(f"[warn] remote inference failed ({type(ex).__name__}: {ex}). Falling back to local inference.")
+            infer_url = ""  # fall back
+    if not infer_url:
+        eprint("[stage3] loading sentiment tokenizer...")
+        sent_tok = load_tokenizer(sent_model_dir)
+        eprint("[stage3] loading sentiment model...")
+        sent_model = load_model(sent_model_dir, device)
+
+        eprint("[stage3] loading rating tokenizer...")
+        rate_tok = load_tokenizer(rate_model_dir)
+        eprint("[stage3] loading rating model...")
+        rate_model = load_model(rate_model_dir, device)
+
+        sent_probs = infer_probs(sent_model, sent_tok, texts, device, max_len, batch, desc="sentiment")  # 3
+        rate_probs = infer_probs(rate_model, rate_tok, texts, device, max_len, batch, desc="rating")  # 5
 
     if sent_probs and len(sent_probs[0]) != 3:
         eprint(f"[warn] sentiment head size={len(sent_probs[0])}, expected 3 (neg/neu/pos)")
