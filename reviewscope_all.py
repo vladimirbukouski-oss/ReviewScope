@@ -396,11 +396,32 @@ def wb_resolve_card_host(s: requests.Session, vol: int, debug: bool = False) -> 
     return host
 
 
+def wb_fetch_card_json_via_api(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
+    url = "https://card.wb.ru/cards/v1/detail"
+    param_sets = [
+        {"appType": 1, "curr": "byn", "dest": -59202, "nm": nm_id},
+        {"appType": 1, "curr": "rub", "dest": -1257786, "nm": nm_id},
+        {"nm": nm_id},
+    ]
+    last_err: Optional[Exception] = None
+    for params in param_sets:
+        try:
+            return req_json(s, url, params=params, tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"Failed to fetch WB card via API for nmId={nm_id}: {last_err}")
+
+
 def wb_fetch_card_json(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
     vol, part = wb_nm_to_vol_part(nm_id)
-    host = wb_resolve_card_host(s, vol, debug=debug)
-    url = f"https://{host}/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
-    return req_json(s, url, tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
+    try:
+        host = wb_resolve_card_host(s, vol, debug=debug)
+        url = f"https://{host}/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
+        return req_json(s, url, tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
+    except Exception as e:
+        if debug:
+            eprint(f"[wb] card.json fallback due to: {e}")
+        return wb_fetch_card_json_via_api(s, nm_id, debug=debug)
 
 
 def wb_extract_imt_id(card_js: Dict[str, Any]) -> int:
