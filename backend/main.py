@@ -171,6 +171,12 @@ def _download_gdrive_file(file_id: str, dest_path: Path) -> None:
             if chunk:
                 f.write(chunk)
 
+def _ensure_zip(path: Path) -> bool:
+    try:
+        return zipfile.is_zipfile(path)
+    except Exception:
+        return False
+
 def ensure_models_available() -> None:
     if _model_files_present(SENT_MODEL) and _model_files_present(RATE_MODEL):
         print("[MODELS] Models already present, skipping download")
@@ -190,6 +196,20 @@ def ensure_models_available() -> None:
 
     print(f"[MODELS] Downloading models from Google Drive to {zip_path}")
     _download_gdrive_file(gdrive_file_id, zip_path)
+
+    if not _ensure_zip(zip_path):
+        print("[MODELS] Downloaded file is not a zip, retrying with gdown")
+        try:
+            import gdown  # type: ignore
+        except Exception as exc:
+            print(f"[MODELS] gdown not available: {exc}")
+            return
+        # gdown expects just the file id
+        gdown.download(id=gdrive_file_id, output=str(zip_path), quiet=False)
+
+    if not _ensure_zip(zip_path):
+        print("[MODELS] Download failed: not a zip file")
+        return
 
     print(f"[MODELS] Extracting {zip_path} into {BASE_DIR}")
     with zipfile.ZipFile(zip_path, "r") as zf:
