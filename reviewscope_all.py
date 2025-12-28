@@ -43,6 +43,8 @@ import re
 import socket
 import sys
 import time
+import threading
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -52,6 +54,7 @@ import numpy as np
 import pandas as pd
 import requests
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -60,6 +63,42 @@ try:
     import hnswlib  # type: ignore
 except Exception:
     hnswlib = None
+
+
+# ============================================================
+# Model/tokenizer cache (big speedup on CPU hosting)
+# ============================================================
+
+_TOKENIZER_LOCK = threading.Lock()
+_MODEL_LOCK = threading.Lock()
+
+
+def _env_true(name: str, default: str = "0") -> bool:
+    v = os.getenv(name, default).strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+
+@lru_cache(maxsize=16)
+def _cached_tokenizer(path: str):
+    # Keep compatibility with older transformers; prefer fast tokenizer when available.
+    kw = {"use_fast": True}
+    sig = inspect.signature(AutoTokenizer.from_pretrained)
+    if "fix_mistral_regex" in sig.parameters:
+        kw["fix_mistral_regex"] = True
+    return AutoTokenizer.from_pretrained(path, **kw)
+
+
+@lru_cache(maxsize=16)
+def _cached_model(path: str, device_key: str, cpu_int8: bool):
+    m = AutoModelForSequenceClassification.from_pretrained(path)
+    if device_key == "cpu" and cpu_int8:
+        # Dynamic INT8 quantization works well for transformer encoders on CPU.
+        try:
+            m = torch.quantization.quantize_dynamic(m, {nn.Linear}, dtype=torch.qint8)
+        except Exception:
+            pass
+    device = torch.device(device_key)
+    return m.to(device).eval()
 
 
 # ============================================================
@@ -875,16 +914,15 @@ def trust_score(
 
 
 def load_tokenizer(path: str):
-    kw = {}
-    sig = inspect.signature(AutoTokenizer.from_pretrained)
-    if "fix_mistral_regex" in sig.parameters:
-        kw["fix_mistral_regex"] = True
-    return AutoTokenizer.from_pretrained(path, **kw)
+    with _TOKENIZER_LOCK:
+        return _cached_tokenizer(path)
 
 
 def load_model(path: str, device: torch.device):
-    m = AutoModelForSequenceClassification.from_pretrained(path)
-    return m.to(device).eval()
+    device_key = str(device)
+    cpu_int8 = _env_true("RS_CPU_INT8", "0")
+    with _MODEL_LOCK:
+        return _cached_model(path, device_key, cpu_int8)
 
 
 def batched(xs: List[str], bs: int):
@@ -895,10 +933,20 @@ def batched(xs: List[str], bs: int):
 def infer_probs(model, tok, texts: List[str], device: torch.device, max_len: int, bs: int, desc: str) -> List[List[float]]:
     out: List[List[float]] = []
     total = (len(texts) + bs - 1) // max(1, bs)
-    with torch.no_grad():
+    with torch.inference_mode():
         for chunk in tqdm(batched(texts, bs), total=total, desc=desc, unit="batch"):
-            enc = tok(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_len).to(device)
-            probs = F.softmax(model(**enc).logits, dim=-1).detach().cpu().tolist()
+            enc = tok(
+                chunk,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_len,
+                return_token_type_ids=False,
+            )
+            if device.type != "cpu":
+                enc = {k: v.to(device) for k, v in enc.items()}
+            logits = model(**enc).logits
+            probs = torch.softmax(logits, dim=-1).cpu().tolist()
             out.extend(probs)
     return out
 
@@ -927,6 +975,12 @@ def stage3_build_bundle(
     out_dir.mkdir(parents=True, exist_ok=True)
     url = url.strip()
     service = detect_service(url)
+
+    # Allow env overrides even if the caller passes fixed args (handy on CPU PaaS)
+    # INFER_BATCH / INFER_MAX_LEN are also used by backend/main.py in the full zip.
+    batch = int(os.getenv("INFER_BATCH", os.getenv("RS_INFER_BATCH", str(batch))))
+    max_len = int(os.getenv("INFER_MAX_LEN", os.getenv("RS_INFER_MAX_LEN", str(max_len))))
+    device_str = os.getenv("INFER_DEVICE", os.getenv("RS_INFER_DEVICE", device_str))
 
     # 1) fetch
     raw_path = out_dir / "reviews_raw.jsonl"
@@ -971,6 +1025,37 @@ def stage3_build_bundle(
     if not texts:
         raise RuntimeError("После фильтров Stage3 не осталось отзывов. Ослабь --min_len/--min_alpha.")
 
+    # Optional cap to keep CPU inference time bounded on large products
+    # Example: RS_MAX_REVIEWS_MODEL=600
+    try:
+        max_n = int(os.getenv("RS_MAX_REVIEWS_MODEL", "0") or "0")
+    except Exception:
+        max_n = 0
+    if max_n and len(texts) > max_n:
+        # Stratified sample by original rating when available
+        buckets: Dict[int, List[int]] = {}
+        for i, r in enumerate(kept_meta):
+            rt = safe_int(r.get("rating"))
+            key = int(rt) if rt in (1, 2, 3, 4, 5) else 0
+            buckets.setdefault(key, []).append(i)
+        all_idx = list(range(len(texts)))
+        sampled: List[int] = []
+        for key, inds in buckets.items():
+            share = len(inds) / max(1, len(all_idx))
+            k = max(1, int(round(share * max_n)))
+            if len(inds) <= k:
+                sampled.extend(inds)
+            else:
+                sampled.extend(random.sample(inds, k))
+        # Final trim (keep order stable)
+        sampled = sorted(set(sampled))
+        if len(sampled) > max_n:
+            sampled = sorted(random.sample(sampled, max_n))
+        kept_meta = [kept_meta[i] for i in sampled]
+        texts = [texts[i] for i in sampled]
+        hashes = [hashes[i] for i in sampled]
+        eprint(f"[stage3] RS_MAX_REVIEWS_MODEL cap: using {len(texts)} reviews (of original {len(all_idx)})")
+
     dup_counts: Dict[str, int] = {}
     for h in hashes:
         dup_counts[h] = dup_counts.get(h, 0) + 1
@@ -978,6 +1063,15 @@ def stage3_build_bundle(
     # 3) models
     device = torch.device(device_str if torch.cuda.is_available() and device_str.startswith("cuda") else "cpu")
     eprint(f"[device] {device}")
+
+    if device.type == "cpu":
+        # Avoid thread thrashing on small CPU instances (Railway/Render/etc.)
+        try:
+            n = int(os.getenv("RS_TORCH_THREADS", "2"))
+            torch.set_num_threads(max(1, n))
+            torch.set_num_interop_threads(max(1, min(2, n)))
+        except Exception:
+            pass
 
     eprint("[stage3] loading sentiment tokenizer...")
     sent_tok = load_tokenizer(sent_model_dir)
