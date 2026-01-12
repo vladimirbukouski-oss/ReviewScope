@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+import re
 import uuid
 import zipfile
 from datetime import datetime
@@ -151,6 +152,16 @@ def _gdrive_confirm_token(resp: requests.Response) -> str:
     return ""
 
 
+def _gdrive_confirm_from_html(html: str) -> str:
+    m = re.search(r'confirm=([0-9A-Za-z_]+)', html)
+    if m:
+        return m.group(1)
+    m = re.search(r'name="confirm"\s+value="([^"]+)"', html)
+    if m:
+        return m.group(1)
+    return ""
+
+
 def _stream_to_file(resp: requests.Response, out_path: Path, chunk_size: int = 1024 * 1024) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("wb") as f:
@@ -164,11 +175,14 @@ def download_gdrive_file(file_id: str, out_path: Path) -> None:
     session = requests.Session()
     resp = session.get(url, params={"id": file_id}, stream=True)
     token = _gdrive_confirm_token(resp)
+    content_type = resp.headers.get("Content-Type", "")
+    if not token and "text/html" in content_type.lower():
+        token = _gdrive_confirm_from_html(resp.text)
     if token:
         resp = session.get(url, params={"id": file_id, "confirm": token}, stream=True)
-    content_type = resp.headers.get("Content-Type", "")
+        content_type = resp.headers.get("Content-Type", "")
     if "text/html" in content_type.lower():
-        raise RuntimeError("Google Drive download failed (HTML response). Check file id and permissions.")
+        raise RuntimeError("Google Drive download failed (HTML response). Check file id and sharing settings.")
     _stream_to_file(resp, out_path)
 
 
