@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 from dotenv import load_dotenv
+import requests
 
 # Load .env
 load_dotenv()
@@ -104,6 +106,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-small")
 DEVICE = os.getenv("DEVICE", "cpu")
 QUANT = os.getenv("QUANT", "auto")
+GDRIVE_FILE_ID = os.getenv("GDRIVE_FILE_ID", "") or os.getenv("GFRIVE_FILE_ID", "")
 
 def _env_int(name: str, default: int = 0) -> int:
     raw = os.getenv(name, "")
@@ -122,6 +125,7 @@ print(f"[CONFIG] DEVICE: {DEVICE}")
 print(f"[CONFIG] QUANT: {QUANT}")
 print(f"[CONFIG] NUM_THREADS: {NUM_THREADS}")
 print(f"[CONFIG] NUM_INTEROP_THREADS: {NUM_INTEROP_THREADS}")
+print(f"[CONFIG] GDRIVE_FILE_ID: {'set' if GDRIVE_FILE_ID else 'missing'}")
 
 # ============================================================
 # Helper Functions
@@ -129,6 +133,64 @@ print(f"[CONFIG] NUM_INTEROP_THREADS: {NUM_INTEROP_THREADS}")
 
 def url_to_cache_key(url: str) -> str:
     return hashlib.md5(url.strip().lower().encode()).hexdigest()[:16]
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolve_path(path_str: str) -> Path:
+    p = Path(path_str)
+    return p if p.is_absolute() else (_repo_root() / p).resolve()
+
+
+def _gdrive_confirm_token(resp: requests.Response) -> str:
+    for k, v in resp.cookies.items():
+        if k.startswith("download_warning"):
+            return v
+    return ""
+
+
+def _stream_to_file(resp: requests.Response, out_path: Path, chunk_size: int = 1024 * 1024) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("wb") as f:
+        for chunk in resp.iter_content(chunk_size=chunk_size):
+            if chunk:
+                f.write(chunk)
+
+
+def download_gdrive_file(file_id: str, out_path: Path) -> None:
+    url = "https://drive.google.com/uc?export=download"
+    session = requests.Session()
+    resp = session.get(url, params={"id": file_id}, stream=True)
+    token = _gdrive_confirm_token(resp)
+    if token:
+        resp = session.get(url, params={"id": file_id, "confirm": token}, stream=True)
+    content_type = resp.headers.get("Content-Type", "")
+    if "text/html" in content_type.lower():
+        raise RuntimeError("Google Drive download failed (HTML response). Check file id and permissions.")
+    _stream_to_file(resp, out_path)
+
+
+def ensure_models_available() -> Tuple[str, str]:
+    sent_dir = _resolve_path(SENT_MODEL)
+    rate_dir = _resolve_path(RATE_MODEL)
+    if sent_dir.exists() and rate_dir.exists():
+        return str(sent_dir), str(rate_dir)
+    if not GDRIVE_FILE_ID:
+        raise RuntimeError("Missing GDRIVE_FILE_ID (or GFRIVE_FILE_ID) to download models.zip")
+    zip_path = _repo_root() / "models.zip"
+    if not zip_path.exists():
+        print("[MODELS] downloading models.zip from Google Drive...")
+        download_gdrive_file(GDRIVE_FILE_ID, zip_path)
+    if not zipfile.is_zipfile(zip_path):
+        raise RuntimeError("models.zip is not a valid zip file")
+    print("[MODELS] extracting models.zip...")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(_repo_root())
+    if not sent_dir.exists() or not rate_dir.exists():
+        raise RuntimeError("Models not found after extracting models.zip")
+    return str(sent_dir), str(rate_dir)
 
 def detect_service(url: str) -> str:
     s = url.strip().lower()
@@ -208,6 +270,7 @@ async def run_analysis(session_id: str, url: str):
         session["service"] = service
 
         loop = asyncio.get_event_loop()
+        sent_model_dir, rate_model_dir = ensure_models_available()
 
         # Stage 3: Build bundle
         session["status"] = "scoring"
@@ -219,8 +282,8 @@ async def run_analysis(session_id: str, url: str):
             lambda: rs.stage3_build_bundle(
                 url=url,
                 out_dir=out_dir,
-                sent_model_dir=SENT_MODEL,
-                rate_model_dir=RATE_MODEL,
+                sent_model_dir=sent_model_dir,
+                rate_model_dir=rate_model_dir,
                 device_str=DEVICE,
                 quant=QUANT,
                 num_threads=NUM_THREADS,
