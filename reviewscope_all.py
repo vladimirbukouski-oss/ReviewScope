@@ -361,6 +361,8 @@ def wb_parse_nm_id(url_or_id: str) -> int:
 
 
 WB_UPSTREAMS_URL = "https://cdn.wbbasket.ru/api/v3/upstreams"
+WB_CARD_DETAIL_URL = "https://card.wb.ru/cards/detail"
+WB_CARD_DETAIL_DEST = "-1257786"
 
 
 def wb_nm_to_vol_part(nm_id: int) -> Tuple[int, int]:
@@ -387,16 +389,51 @@ def wb_pick_host_by_vol(route_hosts: List[Dict[str, Any]], vol: int) -> Optional
 def wb_resolve_card_host(s: requests.Session, vol: int, debug: bool = False) -> str:
     ups = wb_get_upstreams(s, debug=debug)
     try:
-        hosts = ups["recommend"]["mediabasket_route_map"][0]["hosts"]
+        rec = ups.get("recommend", {})
+        route_maps = rec.get("mediabasket_route_map") or rec.get("basket_route_map") or []
     except Exception:
         raise RuntimeError("Failed to find mediabasket_route_map in WB upstreams.")
-    host = wb_pick_host_by_vol(hosts, vol)
-    if not host:
-        raise RuntimeError(f"Failed to find WB host for vol={vol} in upstreams.")
-    return host
+    # First try to match by vol range across all route maps.
+    for rm in route_maps:
+        if not isinstance(rm, dict):
+            continue
+        a = rm.get("vol_range_from")
+        b = rm.get("vol_range_to")
+        if a is not None and b is not None and not (int(a) <= vol <= int(b)):
+            continue
+        hosts = rm.get("hosts") or []
+        host = wb_pick_host_by_vol(hosts, vol)
+        if host:
+            return host
+    # Fallback: try any host we can find.
+    fallback_hosts = []
+    for rm in route_maps:
+        if isinstance(rm, dict):
+            for h in rm.get("hosts") or []:
+                if isinstance(h, dict) and h.get("host"):
+                    fallback_hosts.append(h.get("host"))
+    if fallback_hosts:
+        return fallback_hosts[0]
+    raise RuntimeError(f"Failed to find WB host for vol={vol} in upstreams.")
 
 
 def wb_fetch_card_json(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
+    # Prefer card detail API (no basket host mapping required).
+    try:
+        payload = req_json(
+            s,
+            WB_CARD_DETAIL_URL,
+            params={"appType": 1, "curr": "rub", "dest": WB_CARD_DETAIL_DEST, "nm": int(nm_id)},
+            tries=3,
+            sleep_base=0.3,
+            timeout=(4.0, 15.0),
+            debug=debug,
+        )
+        if isinstance(payload, dict):
+            return payload
+    except Exception as e:
+        if debug:
+            eprint(f"[wb] card detail fallback to basket host: {e}")
     vol, part = wb_nm_to_vol_part(nm_id)
     host = wb_resolve_card_host(s, vol, debug=debug)
     url = f"https://{host}/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
