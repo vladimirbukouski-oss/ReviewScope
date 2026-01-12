@@ -10,8 +10,6 @@ import os
 import sys
 import time
 import uuid
-import zipfile
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 from dotenv import load_dotenv
-import requests
 
 # Load .env
 load_dotenv()
@@ -89,17 +86,12 @@ analysis_tasks: Dict[str, asyncio.Task] = {}
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Repo root
-HERE_DIR = Path(__file__).parent
-BASE_DIR = HERE_DIR.parent if (HERE_DIR.parent / "reviewscope_all.py").exists() else HERE_DIR
-MODELS_DIR = BASE_DIR / "models"
-
 # Путь к reviewscope_all.py - он лежит рядом с backend (в reviewscope/)
-REVIEWSCOPE_PATH = BASE_DIR / "reviewscope_all.py"
+REVIEWSCOPE_PATH = Path(__file__).parent.parent / "reviewscope_all.py"
 
 # Если не нашли, пробуем в корне ReviewScope
-if not REVIEWSCOPE_PATH.exists() and (HERE_DIR / "reviewscope_all.py").exists():
-    REVIEWSCOPE_PATH = HERE_DIR / "reviewscope_all.py"
+if not REVIEWSCOPE_PATH.exists():
+    REVIEWSCOPE_PATH = Path(__file__).parent.parent.parent / "reviewscope_all.py"
 
 print(f"[CONFIG] reviewscope_all.py path: {REVIEWSCOPE_PATH}")
 print(f"[CONFIG] exists: {REVIEWSCOPE_PATH.exists()}")
@@ -111,114 +103,29 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-small")
 DEVICE = os.getenv("DEVICE", "cpu")
+QUANT = os.getenv("QUANT", "auto")
 
-def resolve_model_path(value: str) -> str:
-    # Keep HF repo ids as-is; resolve only path-like values.
-    if value.startswith(".") or "/" in value or "\\" in value:
-        p = Path(value)
-        if not p.is_absolute():
-            p = (BASE_DIR / p).resolve()
-        return str(p)
-    return value
+def _env_int(name: str, default: int = 0) -> int:
+    raw = os.getenv(name, "")
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
 
-SENT_MODEL = resolve_model_path(SENT_MODEL)
-RATE_MODEL = resolve_model_path(RATE_MODEL)
+NUM_THREADS = _env_int("NUM_THREADS", 0)
+NUM_INTEROP_THREADS = _env_int("NUM_INTEROP_THREADS", 0)
 
 print(f"[CONFIG] SENT_MODEL: {SENT_MODEL}")
 print(f"[CONFIG] RATE_MODEL: {RATE_MODEL}")
 print(f"[CONFIG] LLM_PROVIDER: {LLM_PROVIDER}")
 print(f"[CONFIG] DEVICE: {DEVICE}")
+print(f"[CONFIG] QUANT: {QUANT}")
+print(f"[CONFIG] NUM_THREADS: {NUM_THREADS}")
+print(f"[CONFIG] NUM_INTEROP_THREADS: {NUM_INTEROP_THREADS}")
 
 # ============================================================
 # Helper Functions
 # ============================================================
-
-def _model_files_present(model_dir: str) -> bool:
-    p = Path(model_dir)
-    if p.is_dir():
-        return (p / "model.safetensors").exists() or (p / "pytorch_model.bin").exists()
-    return p.exists()
-
-def _extract_gdrive_file_id(url: str) -> Optional[str]:
-    # Supports share links like .../file/d/<id>/view and links with ?id=<id>
-    if "id=" in url:
-        m = re.search(r"[?&]id=([^&]+)", url)
-        if m:
-            return m.group(1)
-    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
-    if m:
-        return m.group(1)
-    return None
-
-def _download_gdrive_file(file_id: str, dest_path: Path) -> None:
-    session = requests.Session()
-    base_url = "https://docs.google.com/uc?export=download"
-    response = session.get(base_url, params={"id": file_id}, stream=True)
-
-    token = None
-    for k, v in response.cookies.items():
-        if k.startswith("download_warning"):
-            token = v
-            break
-
-    if token:
-        response = session.get(base_url, params={"id": file_id, "confirm": token}, stream=True)
-
-    response.raise_for_status()
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest_path, "wb") as f:
-        for chunk in response.iter_content(1024 * 1024):
-            if chunk:
-                f.write(chunk)
-
-def _ensure_zip(path: Path) -> bool:
-    try:
-        return zipfile.is_zipfile(path)
-    except Exception:
-        return False
-
-def ensure_models_available() -> None:
-    if _model_files_present(SENT_MODEL) and _model_files_present(RATE_MODEL):
-        print("[MODELS] Models already present, skipping download")
-        return
-
-    gdrive_url = os.getenv("GDRIVE_URL")
-    gdrive_file_id = os.getenv("GDRIVE_FILE_ID")
-    if not gdrive_file_id and gdrive_url:
-        gdrive_file_id = _extract_gdrive_file_id(gdrive_url)
-
-    if not gdrive_file_id:
-        print("[MODELS] Missing models and no GDRIVE_URL/GDRIVE_FILE_ID set")
-        return
-
-    zip_name = os.getenv("GDRIVE_ZIP_NAME", "models.zip")
-    zip_path = Path(os.getenv("GDRIVE_ZIP_PATH", str(BASE_DIR / zip_name)))
-
-    print(f"[MODELS] Downloading models from Google Drive to {zip_path}")
-    _download_gdrive_file(gdrive_file_id, zip_path)
-
-    if not _ensure_zip(zip_path):
-        print("[MODELS] Downloaded file is not a zip, retrying with gdown")
-        try:
-            import gdown  # type: ignore
-        except Exception as exc:
-            print(f"[MODELS] gdown not available: {exc}")
-            return
-        # gdown expects just the file id
-        gdown.download(id=gdrive_file_id, output=str(zip_path), quiet=False)
-
-    if not _ensure_zip(zip_path):
-        print("[MODELS] Download failed: not a zip file")
-        return
-
-    print(f"[MODELS] Extracting {zip_path} into {BASE_DIR}")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(BASE_DIR)
-
-    if _model_files_present(SENT_MODEL) and _model_files_present(RATE_MODEL):
-        print("[MODELS] Models ready")
-    else:
-        print("[MODELS] Download finished but model files not found")
 
 def url_to_cache_key(url: str) -> str:
     return hashlib.md5(url.strip().lower().encode()).hexdigest()[:16]
@@ -278,11 +185,6 @@ def load_reviewscope_module():
     spec.loader.exec_module(rs)
     return rs
 
-@app.on_event("startup")
-async def startup_event():
-    # Download models in background so healthcheck can pass quickly.
-    asyncio.create_task(asyncio.to_thread(ensure_models_available))
-
 # ============================================================
 # Background Analysis Task
 # ============================================================
@@ -320,11 +222,14 @@ async def run_analysis(session_id: str, url: str):
                 sent_model_dir=SENT_MODEL,
                 rate_model_dir=RATE_MODEL,
                 device_str=DEVICE,
-                min_len_fetch=15,
+                quant=QUANT,
+                num_threads=NUM_THREADS,
+                num_interop_threads=NUM_INTEROP_THREADS,
+                min_len_fetch=30,
                 threshold=1000,
                 per_rating=100,
-                min_len=20,
-                min_alpha=10,
+                min_len=40,
+                min_alpha=20,
                 batch=32,
                 max_len=256,
                 topk=8,
@@ -600,5 +505,4 @@ async def list_sessions():
 # ============================================================
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8888"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8888, reload=True)
