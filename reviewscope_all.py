@@ -1229,20 +1229,7 @@ def stage3_build_bundle(
     sent_probs: List[List[float]]
     rate_probs: List[List[float]]
 
-    if infer_url:
-        eprint(f"[stage3] remote inference enabled: {infer_url}")
-        try:
-            sent_probs, rate_probs = infer_probs_remote(
-                texts=texts,
-                max_len=max_len,
-                batch=batch,
-                infer_url=infer_url,
-                token=infer_token,
-                timeout_s=float(os.getenv("RS_REMOTE_TIMEOUT_S", "180")),
-            )
-        except Exception as ex:
-            eprint(f"[warn] remote inference failed ({type(ex).__name__}: {ex}). Falling back to local inference.")
-            infer_url = ""  # fall back
+    infer_url = ""  # fall back
     if not infer_url:
         eprint("[stage3] loading sentiment tokenizer...")
         sent_tok = load_tokenizer(sent_model_dir)
