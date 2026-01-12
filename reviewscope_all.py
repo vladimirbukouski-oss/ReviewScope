@@ -956,12 +956,16 @@ def batched(xs: List[str], bs: int):
 
 def infer_probs(model, tok, texts: List[str], device: torch.device, max_len: int, bs: int, desc: str) -> List[List[float]]:
     out: List[List[float]] = []
-    total = (len(texts) + bs - 1) // max(1, bs)
 
-    # Для Railway: меньший batch для экономии памяти
-    if device.type == "cpu" and bs > 16:
-        bs = min(bs, 16)
-        total = (len(texts) + bs - 1) // bs
+    # Агрессивная оптимизация для Railway: большие батчи на CPU с INT8
+    if device.type == "cpu":
+        # INT8 модель может обрабатывать больше за раз
+        bs = 32 if bs < 32 else bs
+        # Ограничение max_len для Railway
+        if max_len > 192:
+            max_len = 128  # Еще меньше для скорости
+
+    total = (len(texts) + bs - 1) // max(1, bs)
 
     with torch.inference_mode():
         # autocast только для CUDA, на CPU он медленнее
@@ -1168,12 +1172,12 @@ def stage3_build_bundle(
     if not texts:
         raise RuntimeError("После фильтров Stage3 не осталось отзывов. Ослабь --min_len/--min_alpha.")
 
-    # Optional cap to keep CPU inference time bounded on large products
-    # Example: RS_MAX_REVIEWS_MODEL=600
+    # Жесткий лимит для Railway: максимум 150 отзывов по умолчанию
+    # Это дает ~4-5 секунд инференса вместо 20+
     try:
-        max_n = int(os.getenv("RS_MAX_REVIEWS_MODEL", "0") or "0")
+        max_n = int(os.getenv("RS_MAX_REVIEWS_MODEL", "150") or "150")
     except Exception:
-        max_n = 0
+        max_n = 150
     if max_n and len(texts) > max_n:
         # Stratified sample by original rating when available
         buckets: Dict[int, List[int]] = {}
