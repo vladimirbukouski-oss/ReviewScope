@@ -957,13 +957,12 @@ def batched(xs: List[str], bs: int):
 def infer_probs(model, tok, texts: List[str], device: torch.device, max_len: int, bs: int, desc: str) -> List[List[float]]:
     out: List[List[float]] = []
 
-    # Агрессивная оптимизация для Railway: большие батчи на CPU с INT8
+    # Оптимизация для Railway Hobby Plan: маленький batch критичен!
     if device.type == "cpu":
-        # INT8 модель может обрабатывать больше за раз
-        bs = 32 if bs < 32 else bs
-        # Ограничение max_len для Railway
-        if max_len > 192:
-            max_len = 128  # Еще меньше для скорости
+        # ВАЖНО: batch=8 оптимален для Railway shared CPU (batch=32 дает 20 сек/батч!)
+        bs = 8
+        # Агрессивное сокращение токенов для скорости
+        max_len = min(max_len, 96)  # 96 токенов достаточно для отзывов
 
     total = (len(texts) + bs - 1) // max(1, bs)
 
