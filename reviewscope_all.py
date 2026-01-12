@@ -90,15 +90,39 @@ def _cached_tokenizer(path: str):
 
 @lru_cache(maxsize=16)
 def _cached_model(path: str, device_key: str, cpu_int8: bool):
-    m = AutoModelForSequenceClassification.from_pretrained(path)
-    if device_key == "cpu" and cpu_int8:
-        # Dynamic INT8 quantization works well for transformer encoders on CPU.
+    # Для Railway: загружаем с low_cpu_mem_usage для экономии памяти
+    m = AutoModelForSequenceClassification.from_pretrained(
+        path,
+        low_cpu_mem_usage=True,
+        torch_dtype=torch.float32 if device_key == "cpu" else torch.float16
+    )
+    device = torch.device(device_key)
+
+    if device_key == "cpu":
+        # INT8 квантизация ОБЯЗАТЕЛЬНА для Railway - ускорение в 3-4 раза
+        if not cpu_int8:
+            cpu_int8 = True  # Форсим для Railway
         try:
             m = torch.quantization.quantize_dynamic(m, {nn.Linear}, dtype=torch.qint8)
+            eprint("[optimization] INT8 quantization enabled for CPU")
+        except Exception as e:
+            eprint(f"[warn] INT8 quantization failed: {e}")
+    elif device.type == "cuda":
+        # Оптимизации для CUDA
+        try:
+            m = torch.compile(m, mode="reduce-overhead")
         except Exception:
             pass
-    device = torch.device(device_key)
-    return m.to(device).eval()
+        torch.backends.cudnn.benchmark = True
+
+    m = m.to(device).eval()
+
+    # Очищаем кеш после загрузки для Railway
+    if device_key == "cpu":
+        import gc
+        gc.collect()
+
+    return m
 
 
 # ============================================================
@@ -933,21 +957,37 @@ def batched(xs: List[str], bs: int):
 def infer_probs(model, tok, texts: List[str], device: torch.device, max_len: int, bs: int, desc: str) -> List[List[float]]:
     out: List[List[float]] = []
     total = (len(texts) + bs - 1) // max(1, bs)
+
+    # Для Railway: меньший batch для экономии памяти
+    if device.type == "cpu" and bs > 16:
+        bs = min(bs, 16)
+        total = (len(texts) + bs - 1) // bs
+
     with torch.inference_mode():
-        for chunk in tqdm(batched(texts, bs), total=total, desc=desc, unit="batch"):
-            enc = tok(
-                chunk,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=max_len,
-                return_token_type_ids=False,
-            )
-            if device.type != "cpu":
-                enc = {k: v.to(device) for k, v in enc.items()}
-            logits = model(**enc).logits
-            probs = torch.softmax(logits, dim=-1).cpu().tolist()
-            out.extend(probs)
+        # autocast только для CUDA, на CPU он медленнее
+        ctx = torch.amp.autocast(device_type='cuda') if device.type == 'cuda' else torch.no_grad()
+        with ctx:
+            for chunk in tqdm(batched(texts, bs), total=total, desc=desc, unit="batch"):
+                enc = tok(
+                    chunk,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=max_len,
+                    return_token_type_ids=False,
+                )
+                if device.type != "cpu":
+                    enc = {k: v.to(device, non_blocking=True) for k, v in enc.items()}
+
+                logits = model(**enc).logits
+                # F.softmax быстрее torch.softmax на CPU
+                probs = F.softmax(logits.float(), dim=-1).cpu().tolist()
+                out.extend(probs)
+
+                # Для Railway: освобождаем память после каждого батча
+                if device.type == "cpu":
+                    del enc, logits
+
     return out
 
 
@@ -1168,11 +1208,13 @@ def stage3_build_bundle(
     eprint(f"[device] {device}")
 
     if device.type == "cpu":
-        # Avoid thread thrashing on small CPU instances (Railway/Render/etc.)
+        # Оптимизации для Railway Hobby Plan (512MB RAM, shared CPU)
         try:
-            n = int(os.getenv("RS_TORCH_THREADS", "2"))
+            n = int(os.getenv("RS_TORCH_THREADS", "1"))  # 1 поток для Railway
             torch.set_num_threads(max(1, n))
-            torch.set_num_interop_threads(max(1, min(2, n)))
+            torch.set_num_interop_threads(1)
+            # Включаем oneDNN для ускорения на CPU
+            torch._C._set_mkldnn_enabled(True)
         except Exception:
             pass
 
