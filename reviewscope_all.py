@@ -1655,7 +1655,7 @@ def rag_answer(question: str, ctx: List[Dict[str, Any]], llm_cfg: LLMProviderCon
 
 
 def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]], llm_cfg: LLMProviderConfig,
-                      max_evidence: int = 90) -> Dict[str, Any]:
+                      max_evidence: int = 10) -> Dict[str, Any]:
     def pred_star(r: Dict[str, Any]) -> int:
         v = r.get("pred_star_hard", None)
         if v is None:
@@ -1823,7 +1823,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if args.make_summary:
         summary_obj, reviews = load_stage3_bundle(bundle_path)
         llm_cfg = LLMProviderConfig(provider=args.llm_provider, model=args.llm_model, temperature=args.temp)
-        out = summarize_product(summary_obj, reviews, llm_cfg, max_evidence=args.max_evidence)
+        out = summarize_product(summary_obj, reviews, llm_cfg, max_evidence=10)
         out_path = Path(args.summary_out) if args.summary_out else (out_dir / "stage4_summary.json")
         write_json(out_path, out)
         eprint(f"OK: summary -> {out_path}")
