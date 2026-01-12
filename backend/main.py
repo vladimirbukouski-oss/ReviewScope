@@ -107,7 +107,9 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 EMB_MODEL = os.getenv("EMB_MODEL", "text-embedding-3-small")
 DEVICE = os.getenv("DEVICE", "cpu")
 QUANT = os.getenv("QUANT", "auto")
-GDRIVE_FILE_ID = os.getenv("GDRIVE_FILE_ID", "") or os.getenv("GFRIVE_FILE_ID", "")
+GDRIVE_FILE_ID = (os.getenv("GDRIVE_FILE_ID", "") or os.getenv("GFRIVE_FILE_ID", "")).strip()
+print(f"[CONFIG] GDRIVE_FILE_ID raw: {GDRIVE_FILE_ID!r}, len={len(GDRIVE_FILE_ID)}")
+
 
 def _env_int(name: str, default: int = 0) -> int:
     raw = os.getenv(name, "")
