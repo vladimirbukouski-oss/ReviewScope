@@ -43,6 +43,8 @@ import re
 import socket
 import sys
 import time
+import threading
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -52,6 +54,7 @@ import numpy as np
 import pandas as pd
 import requests
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -60,6 +63,42 @@ try:
     import hnswlib  # type: ignore
 except Exception:
     hnswlib = None
+
+
+# ============================================================
+# Model/tokenizer cache (big speedup on CPU hosting)
+# ============================================================
+
+_TOKENIZER_LOCK = threading.Lock()
+_MODEL_LOCK = threading.Lock()
+
+
+def _env_true(name: str, default: str = "0") -> bool:
+    v = os.getenv(name, default).strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+
+@lru_cache(maxsize=16)
+def _cached_tokenizer(path: str):
+    # Keep compatibility with older transformers; prefer fast tokenizer when available.
+    kw = {"use_fast": True}
+    sig = inspect.signature(AutoTokenizer.from_pretrained)
+    if "fix_mistral_regex" in sig.parameters:
+        kw["fix_mistral_regex"] = True
+    return AutoTokenizer.from_pretrained(path, **kw)
+
+
+@lru_cache(maxsize=16)
+def _cached_model(path: str, device_key: str, cpu_int8: bool):
+    m = AutoModelForSequenceClassification.from_pretrained(path)
+    if device_key == "cpu" and cpu_int8:
+        # Dynamic INT8 quantization works well for transformer encoders on CPU.
+        try:
+            m = torch.quantization.quantize_dynamic(m, {nn.Linear}, dtype=torch.qint8)
+        except Exception:
+            pass
+    device = torch.device(device_key)
+    return m.to(device).eval()
 
 
 # ============================================================
@@ -357,12 +396,10 @@ def wb_parse_nm_id(url_or_id: str) -> int:
     m = re.search(r"(\d{6,})", s)
     if m:
         return int(m.group(1))
-    raise ValueError(f"Р?Рч С?Р?Р?Р? Р?С<С'Р°С%РёС'С? nmId РёР·: {url_or_id}")
+    raise ValueError(f"Не смог распарсить nmId из: {url_or_id}")
 
 
 WB_UPSTREAMS_URL = "https://cdn.wbbasket.ru/api/v3/upstreams"
-WB_CARD_DETAIL_URL = "https://card.wb.ru/cards/detail"
-WB_CARD_DETAIL_DEST = "-1257786"
 
 
 def wb_nm_to_vol_part(nm_id: int) -> Tuple[int, int]:
@@ -387,69 +424,194 @@ def wb_pick_host_by_vol(route_hosts: List[Dict[str, Any]], vol: int) -> Optional
 
 
 def wb_resolve_card_host(s: requests.Session, vol: int, debug: bool = False) -> str:
+    """Resolve which *.wbbasket.ru host stores card.json for a given volume.
+
+    WB регулярно меняет схему upstreams. Вместо жёсткой привязки к одному ключу,
+    пытаемся найти подходящий route_map в нескольких местах.
+    """
     ups = wb_get_upstreams(s, debug=debug)
-    try:
-        rec = ups.get("recommend", {})
-        route_maps = rec.get("mediabasket_route_map") or rec.get("basket_route_map") or []
-    except Exception:
-        raise RuntimeError("Failed to find mediabasket_route_map in WB upstreams.")
-    # First try to match by vol range across all route maps.
-    for rm in route_maps:
-        if not isinstance(rm, dict):
+
+    # Collect candidate host maps from both "recommend" and "origin" sections.
+    candidates: List[Tuple[str, List[Dict[str, Any]]]] = []
+    for sect in ("recommend", "origin"):
+        sec = ups.get(sect)
+        if not isinstance(sec, dict):
             continue
-        a = rm.get("vol_range_from")
-        b = rm.get("vol_range_to")
-        if a is not None and b is not None and not (int(a) <= vol <= int(b)):
-            continue
-        hosts = rm.get("hosts") or []
+        for key in ("mediabasket_route_map", "basket_route_map"):
+            rm = sec.get(key)
+            if isinstance(rm, list) and rm and isinstance(rm[0], dict):
+                hosts = rm[0].get("hosts")
+                if isinstance(hosts, list) and hosts:
+                    candidates.append((f"{sect}.{key}", hosts))
+
+    # Try to pick a host from any of the candidates.
+    for name, hosts in candidates:
         host = wb_pick_host_by_vol(hosts, vol)
         if host:
             return host
-    # Fallback: try any host we can find.
-    fallback_hosts = []
-    for rm in route_maps:
-        if isinstance(rm, dict):
-            for h in rm.get("hosts") or []:
-                if isinstance(h, dict) and h.get("host"):
-                    fallback_hosts.append(h.get("host"))
-    if fallback_hosts:
-        return fallback_hosts[0]
-    raise RuntimeError(f"Failed to find WB host for vol={vol} in upstreams.")
+        if debug:
+            eprint(f"[wb] no host for vol={vol} in {name}")
+
+    # As a very defensive fallback: if vol is above the max known range, return the host
+    # with the largest vol_range_to (better than crashing with a confusing error).
+    max_to: Optional[int] = None
+    max_host: Optional[str] = None
+    for _, hosts in candidates:
+        for h in hosts:
+            try:
+                b = int(h.get("vol_range_to"))
+            except Exception:
+                continue
+            if max_to is None or b > max_to:
+                max_to = b
+                max_host = h.get("host")
+    if max_to is not None and max_host and vol > max_to:
+        if debug:
+            eprint(f"[wb] vol={vol} выше max_range_to={max_to}; fallback host={max_host}")
+        return max_host
+
+    raise RuntimeError(f"Failed to find WB host for vol={vol} in upstreams (no matching route_map).")
+
+
+def wb_try_fetch_card_json_from_hosts(
+    s: requests.Session,
+    nm_id: int,
+    vol: int,
+    part: int,
+    hosts: List[str],
+    debug: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Try to GET card.json from a list of candidate basket hosts (best-effort)."""
+    url_path = f"/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
+    for h in hosts:
+        try:
+            return req_json(
+                s,
+                f"https://{h}{url_path}",
+                tries=1,
+                sleep_base=0.2,
+                timeout=(4.0, 12.0),
+                debug=debug,
+            )
+        except Exception:
+            continue
+    return None
+
+
+def wb_fetch_card_json_via_api(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
+    # Endpoints here are not part of the official seller API, and they change over time.
+    # We therefore try a small set of known variants.
+    attempts: List[Tuple[str, List[Dict[str, Any]]]] = [
+        (
+            "https://card.wb.ru/cards/v4/detail",
+            [
+                {"dest": -1257786, "locale": "ru", "nm": nm_id},
+                {"dest": "-1216601,-115136,-421732,123585595", "locale": "ru", "nm": nm_id},
+            ],
+        ),
+        (
+            "https://card.wb.ru/cards/v2/detail",
+            [
+                {"ab_testing": "false", "appType": 1, "curr": "rub", "dest": -1257786, "spp": 30, "nm": nm_id},
+                {"appType": 1, "curr": "byn", "dest": -59202, "spp": 30, "nm": nm_id},
+            ],
+        ),
+        (
+            "https://card.wb.ru/cards/detail",
+            [
+                {"appType": 1, "curr": "rub", "dest": -1257786, "spp": 30, "nm": nm_id},
+                {"nm": nm_id},
+            ],
+        ),
+        (
+            "https://card.wb.ru/cards/v1/detail",
+            [
+                {"appType": 1, "curr": "rub", "dest": -1257786, "spp": 30, "nm": nm_id},
+                {"nm": nm_id},
+            ],
+        ),
+    ]
+
+    last_err: Optional[Exception] = None
+    saw_404 = False
+    for url, param_sets in attempts:
+        for params in param_sets:
+            try:
+                return req_json(s, url, params=params, tries=2, sleep_base=0.25, timeout=(4.0, 15.0), debug=debug)
+            except Exception as e:
+                last_err = e
+                # Heuristic: if every endpoint returns 404, the item is likely removed/hidden.
+                if " 404 " in f" {e} ":
+                    saw_404 = True
+
+    if saw_404:
+        raise RuntimeError(
+            f"WB карточка не найдена (nmId={nm_id}). Все варианты card.wb.ru вернули 404 — возможно товар удалён/скрыт."
+        )
+    raise RuntimeError(f"Failed to fetch WB card via API for nmId={nm_id}: {last_err}")
 
 
 def wb_fetch_card_json(s: requests.Session, nm_id: int, debug: bool = False) -> Dict[str, Any]:
-    # Prefer card detail API (no basket host mapping required).
+    vol, part = wb_nm_to_vol_part(nm_id)
+    url_path = f"/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
+
+    # 1) normal path via upstreams route-map
     try:
-        payload = req_json(
-            s,
-            WB_CARD_DETAIL_URL,
-            params={"appType": 1, "curr": "rub", "dest": WB_CARD_DETAIL_DEST, "nm": int(nm_id)},
-            tries=3,
-            sleep_base=0.3,
-            timeout=(4.0, 15.0),
-            debug=debug,
-        )
-        if isinstance(payload, dict):
-            return payload
+        host = wb_resolve_card_host(s, vol, debug=debug)
+        return req_json(s, f"https://{host}{url_path}", tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
     except Exception as e:
         if debug:
-            eprint(f"[wb] card detail fallback to basket host: {e}")
-    vol, part = wb_nm_to_vol_part(nm_id)
-    host = wb_resolve_card_host(s, vol, debug=debug)
-    url = f"https://{host}/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
-    return req_json(s, url, tries=3, sleep_base=0.3, timeout=(4.0, 15.0), debug=debug)
+            eprint(f"[wb] resolve+fetch card.json failed: {e}")
+
+    # 2) defensive path: try all known basket hosts from upstreams (dedup)
+    try:
+        ups = wb_get_upstreams(s, debug=debug)
+        cand: List[str] = []
+        for sect in ("recommend", "origin"):
+            sec = ups.get(sect)
+            if not isinstance(sec, dict):
+                continue
+            rm = sec.get("mediabasket_route_map")
+            if isinstance(rm, list) and rm and isinstance(rm[0], dict):
+                hs = rm[0].get("hosts")
+                if isinstance(hs, list):
+                    for h in hs:
+                        host = h.get("host")
+                        if host:
+                            cand.append(str(host))
+        # stable order, remove duplicates
+        seen: set = set()
+        cand_uniq = [h for h in cand if not (h in seen or seen.add(h))]
+        js = wb_try_fetch_card_json_from_hosts(s, nm_id, vol, part, cand_uniq, debug=debug)
+        if js is not None:
+            return js
+    except Exception as e:
+        if debug:
+            eprint(f"[wb] all-hosts card.json fallback failed: {e}")
+
+    # 3) final fallback: card.wb.ru endpoints
+    return wb_fetch_card_json_via_api(s, nm_id, debug=debug)
 
 
 def wb_extract_imt_id(card_js: Dict[str, Any]) -> int:
-    for k in ("imtId", "imt_id", "imt"):
+    # card.json often has imtId at the root; card.wb.ru variants may expose it as "root".
+    for k in ("imtId", "imt_id", "imt", "root"):
         v = card_js.get(k)
         if v is not None and str(v).isdigit():
             return int(v)
     if isinstance(card_js.get("data"), dict):
         prods = card_js["data"].get("products")
         if isinstance(prods, list) and prods:
-            for k in ("imtId", "imt_id", "imt"):
+            for k in ("imtId", "imt_id", "imt", "root"):
                 v = prods[0].get(k)
+                if v is not None and str(v).isdigit():
+                    return int(v)
+    # v4/detail format: {"products": [...]} (no "data" wrapper)
+    if isinstance(card_js.get("products"), list) and card_js["products"]:
+        p0 = card_js["products"][0]
+        if isinstance(p0, dict):
+            for k in ("imtId", "imt_id", "imt", "root"):
+                v = p0.get(k)
                 if v is not None and str(v).isdigit():
                     return int(v)
     raise RuntimeError("Failed to extract imtId from card.json")
@@ -683,17 +845,6 @@ def md5(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
-def sha1_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    h = hashlib.sha1()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def clamp(x: float, a: float, b: float) -> float:
     return a if x < a else b if x > b else x
 
@@ -763,64 +914,15 @@ def trust_score(
 
 
 def load_tokenizer(path: str):
-    kw = {}
-    sig = inspect.signature(AutoTokenizer.from_pretrained)
-    if "fix_mistral_regex" in sig.parameters:
-        kw["fix_mistral_regex"] = True
-    return AutoTokenizer.from_pretrained(path, **kw)
+    with _TOKENIZER_LOCK:
+        return _cached_tokenizer(path)
 
 
-def configure_torch_threads(num_threads: int, num_interop_threads: int) -> None:
-    if num_threads and num_threads > 0:
-        try:
-            torch.set_num_threads(num_threads)
-        except Exception as e:
-            eprint(f"[warn] torch.set_num_threads({num_threads}) failed: {e}")
-    if num_interop_threads and num_interop_threads > 0:
-        try:
-            torch.set_num_interop_threads(num_interop_threads)
-        except Exception as e:
-            eprint(f"[warn] torch.set_num_interop_threads({num_interop_threads}) failed: {e}")
-
-
-def resolve_quant_mode(quant: str, device: torch.device) -> str:
-    q = (quant or "auto").lower()
-    if q == "auto":
-        return "int8" if device.type == "cpu" else "none"
-    if q not in {"none", "int8"}:
-        raise ValueError(f"Unknown quant mode: {quant}")
-    if q == "int8" and device.type != "cpu":
-        eprint("[warn] int8 quantization is CPU-only; disabling.")
-        return "none"
-    return q
-
-
-def maybe_share_tokenizer(sent_dir: str, rate_dir: str) -> bool:
-    sent = Path(sent_dir)
-    rate = Path(rate_dir)
-    cand = ["tokenizer.json", "sentencepiece.bpe.model"]
-    for name in cand:
-        sent_path = sent / name
-        rate_path = rate / name
-        if sent_path.exists() and rate_path.exists() and sent_path.stat().st_size == rate_path.stat().st_size:
-            if sha1_file(sent_path) == sha1_file(rate_path):
-                return True
-    return False
-
-
-def load_model(path: str, device: torch.device, quant: str = "none"):
-    m = AutoModelForSequenceClassification.from_pretrained(path)
-    m.eval()
-    if device.type != "cpu":
-        return m.to(device)
-    if quant == "int8":
-        try:
-            if "fbgemm" in torch.backends.quantized.supported_engines:
-                torch.backends.quantized.engine = "fbgemm"
-            m = torch.quantization.quantize_dynamic(m, {torch.nn.Linear}, dtype=torch.qint8)
-        except Exception as e:
-            eprint(f"[warn] int8 quantization failed, fallback to fp32: {e}")
-    return m
+def load_model(path: str, device: torch.device):
+    device_key = str(device)
+    cpu_int8 = _env_true("RS_CPU_INT8", "0")
+    with _MODEL_LOCK:
+        return _cached_model(path, device_key, cpu_int8)
 
 
 def batched(xs: List[str], bs: int):
@@ -833,48 +935,123 @@ def infer_probs(model, tok, texts: List[str], device: torch.device, max_len: int
     total = (len(texts) + bs - 1) // max(1, bs)
     with torch.inference_mode():
         for chunk in tqdm(batched(texts, bs), total=total, desc=desc, unit="batch"):
-            enc = tok(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_len)
+            enc = tok(
+                chunk,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_len,
+                return_token_type_ids=False,
+            )
             if device.type != "cpu":
-                enc = enc.to(device)
-            probs = F.softmax(model(**enc).logits, dim=-1).detach().cpu().tolist()
+                enc = {k: v.to(device) for k, v in enc.items()}
+            logits = model(**enc).logits
+            probs = torch.softmax(logits, dim=-1).cpu().tolist()
             out.extend(probs)
     return out
 
 
-def infer_probs_pair(
-    model_a,
-    model_b,
-    tok_a,
-    tok_b,
+
+
+def infer_probs_remote(
     texts: List[str],
-    device: torch.device,
     max_len: int,
-    bs: int,
-    desc: str,
+    batch: int,
+    infer_url: str,
+    token: Optional[str] = None,
+    timeout_s: float = 180.0,
 ) -> Tuple[List[List[float]], List[List[float]]]:
-    out_a: List[List[float]] = []
-    out_b: List[List[float]] = []
-    total = (len(texts) + bs - 1) // max(1, bs)
-    shared = tok_a is tok_b
-    with torch.inference_mode():
-        for chunk in tqdm(batched(texts, bs), total=total, desc=desc, unit="batch"):
-            if shared:
-                enc = tok_a(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_len)
-                if device.type != "cpu":
-                    enc = enc.to(device)
-                logits_a = model_a(**enc).logits
-                logits_b = model_b(**enc).logits
-            else:
-                enc_a = tok_a(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_len)
-                enc_b = tok_b(chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_len)
-                if device.type != "cpu":
-                    enc_a = enc_a.to(device)
-                    enc_b = enc_b.to(device)
-                logits_a = model_a(**enc_a).logits
-                logits_b = model_b(**enc_b).logits
-            out_a.extend(F.softmax(logits_a, dim=-1).detach().cpu().tolist())
-            out_b.extend(F.softmax(logits_b, dim=-1).detach().cpu().tolist())
-    return out_a, out_b
+    """
+    Remote inference for BOTH heads (sentiment 3-class, rating 5-class).
+
+    Supports both endpoint styles:
+      - POST {infer_url}         (Modal часто так работает)
+      - POST {infer_url}/infer   (если ты сам так роут повесил)
+    Body JSON:
+      {"texts":[...], "max_len":192, "batch":64, "auth":"...optional..."}
+    Returns JSON:
+      {"sent_probs":[[...3...],...], "rate_probs":[[...5...],...]}
+    """
+    base = (infer_url or "").strip()
+    if not base:
+        raise ValueError("infer_url is empty")
+
+    base = base.rstrip("/")
+    if base.endswith("/infer"):
+        # если передали полный путь, пробуем его и корень
+        candidates = [base, base[:-5]]
+    else:
+        # по умолчанию сначала корень (как у тебя в PowerShell), потом /infer
+        candidates = [base, base + "/infer"]
+
+    headers = {"Content-Type": "application/json"}
+
+    # Chunking to avoid huge JSON bodies
+    try:
+        chunk_n = int(os.getenv("RS_REMOTE_CHUNK", "256"))
+        if chunk_n <= 0:
+            chunk_n = 256
+    except Exception:
+        chunk_n = 256
+
+    sent_all: List[List[float]] = []
+    rate_all: List[List[float]] = []
+
+    for i in range(0, len(texts), chunk_n):
+        part = texts[i : i + chunk_n]
+        payload = {"texts": part, "max_len": int(max_len), "batch": int(batch)}
+        if token:
+            # у тебя сервис принимает auth в JSON (как в PS примерe)
+            payload["auth"] = token
+
+        last_err: Optional[Exception] = None
+        last_resp_text: str = ""
+
+        ok = False
+        for u in candidates:
+            try:
+                r = requests.post(u, json=payload, headers=headers, timeout=timeout_s)
+
+                # если эндпойнт не тот — пробуем следующий кандидат
+                if r.status_code in (404, 405):
+                    last_resp_text = (r.text or "")[:200]
+                    continue
+
+                if r.status_code in (401, 403):
+                    raise RuntimeError(
+                        f"Remote infer auth failed ({r.status_code}). "
+                        f"Check RS_INFER_TOKEN / server token. Body: {(r.text or '')[:200]}"
+                    )
+
+                r.raise_for_status()
+                data = r.json()
+
+                sp = data.get("sent_probs")
+                rp = data.get("rate_probs")
+                if not isinstance(sp, list) or not isinstance(rp, list):
+                    raise RuntimeError(f"Remote infer bad response keys: {list(data.keys())}")
+
+                if len(sp) != len(part) or len(rp) != len(part):
+                    raise RuntimeError(
+                        f"Remote infer length mismatch: got sent={len(sp)} rate={len(rp)} expected={len(part)}"
+                    )
+
+                sent_all.extend(sp)
+                rate_all.extend(rp)
+                ok = True
+                break
+            except Exception as e:
+                last_err = e
+
+        if not ok:
+            raise RuntimeError(
+                f"Remote infer failed for both endpoints: {candidates}. "
+                f"Last error: {last_err}. Last 404/405 body: {last_resp_text}"
+            )
+
+    return sent_all, rate_all
+
+
 
 
 def stage3_build_bundle(
@@ -882,21 +1059,18 @@ def stage3_build_bundle(
     out_dir: Path,
     sent_model_dir: str,
     rate_model_dir: str,
-    min_len_fetch: int = 30,
+    min_len_fetch: int = 15,
     threshold: int = 1000,
     per_rating: int = 100,
     sleep_s: float = 0.25,
     wb_take: int = 300,
     fb_from: int = 1,
     fb_to: int = 2,
-    min_len: int = 40,
-    min_alpha: int = 20,
+    min_len: int = 20,
+    min_alpha: int = 10,
     batch: int = 64,
     max_len: int = 256,
     device_str: str = "cuda",
-    quant: str = "auto",
-    num_threads: int = 0,
-    num_interop_threads: int = 0,
     topk: int = 8,
     suspicious_thr: float = 0.30,
     debug: bool = False,
@@ -904,6 +1078,12 @@ def stage3_build_bundle(
     out_dir.mkdir(parents=True, exist_ok=True)
     url = url.strip()
     service = detect_service(url)
+
+    # Allow env overrides even if the caller passes fixed args (handy on CPU PaaS)
+    # INFER_BATCH / INFER_MAX_LEN are also used by backend/main.py in the full zip.
+    batch = int(os.getenv("INFER_BATCH", os.getenv("RS_INFER_BATCH", str(batch))))
+    max_len = int(os.getenv("INFER_MAX_LEN", os.getenv("RS_INFER_MAX_LEN", str(max_len))))
+    device_str = os.getenv("INFER_DEVICE", os.getenv("RS_INFER_DEVICE", device_str))
 
     # 1) fetch
     raw_path = out_dir / "reviews_raw.jsonl"
@@ -948,41 +1128,89 @@ def stage3_build_bundle(
     if not texts:
         raise RuntimeError("После фильтров Stage3 не осталось отзывов. Ослабь --min_len/--min_alpha.")
 
+    # Optional cap to keep CPU inference time bounded on large products
+    # Example: RS_MAX_REVIEWS_MODEL=600
+    try:
+        max_n = int(os.getenv("RS_MAX_REVIEWS_MODEL", "0") or "0")
+    except Exception:
+        max_n = 0
+    if max_n and len(texts) > max_n:
+        # Stratified sample by original rating when available
+        buckets: Dict[int, List[int]] = {}
+        for i, r in enumerate(kept_meta):
+            rt = safe_int(r.get("rating"))
+            key = int(rt) if rt in (1, 2, 3, 4, 5) else 0
+            buckets.setdefault(key, []).append(i)
+        all_idx = list(range(len(texts)))
+        sampled: List[int] = []
+        for key, inds in buckets.items():
+            share = len(inds) / max(1, len(all_idx))
+            k = max(1, int(round(share * max_n)))
+            if len(inds) <= k:
+                sampled.extend(inds)
+            else:
+                sampled.extend(random.sample(inds, k))
+        # Final trim (keep order stable)
+        sampled = sorted(set(sampled))
+        if len(sampled) > max_n:
+            sampled = sorted(random.sample(sampled, max_n))
+        kept_meta = [kept_meta[i] for i in sampled]
+        texts = [texts[i] for i in sampled]
+        hashes = [hashes[i] for i in sampled]
+        eprint(f"[stage3] RS_MAX_REVIEWS_MODEL cap: using {len(texts)} reviews (of original {len(all_idx)})")
+
     dup_counts: Dict[str, int] = {}
     for h in hashes:
         dup_counts[h] = dup_counts.get(h, 0) + 1
 
     # 3) models
     device = torch.device(device_str if torch.cuda.is_available() and device_str.startswith("cuda") else "cpu")
-    if device.type == "cpu":
-        configure_torch_threads(num_threads, num_interop_threads)
-    quant_mode = resolve_quant_mode(quant, device)
     eprint(f"[device] {device}")
+
     if device.type == "cpu":
-        eprint(f"[quant] {quant_mode}")
+        # Avoid thread thrashing on small CPU instances (Railway/Render/etc.)
+        try:
+            n = int(os.getenv("RS_TORCH_THREADS", "2"))
+            torch.set_num_threads(max(1, n))
+            torch.set_num_interop_threads(max(1, min(2, n)))
+        except Exception:
+            pass
 
-    eprint("[stage3] loading sentiment tokenizer...")
-    shared_tok = maybe_share_tokenizer(sent_model_dir, rate_model_dir)
-    sent_tok = load_tokenizer(sent_model_dir)
-    eprint("[stage3] loading sentiment model...")
-    sent_model = load_model(sent_model_dir, device, quant=quant_mode)
+    # Optional: run model inference remotely (GPU microservice).
+    # Set RS_INFER_URL (or INFER_URL / INFER_REMOTE_URL) to enable.
+    infer_url = (os.getenv("RS_INFER_URL") or os.getenv("INFER_URL") or os.getenv("INFER_REMOTE_URL") or "").strip()
+    infer_token = (os.getenv("RS_INFER_TOKEN") or os.getenv("INFER_TOKEN") or "").strip() or None
 
-    eprint("[stage3] loading rating tokenizer...")
-    rate_tok = sent_tok if shared_tok else load_tokenizer(rate_model_dir)
-    eprint("[stage3] loading rating model...")
-    rate_model = load_model(rate_model_dir, device, quant=quant_mode)
+    sent_probs: List[List[float]]
+    rate_probs: List[List[float]]
 
-    sent_probs, rate_probs = infer_probs_pair(
-        sent_model,
-        rate_model,
-        sent_tok,
-        rate_tok,
-        texts,
-        device,
-        max_len,
-        batch,
-        desc="sentiment+rating",
-    )
+    if infer_url:
+        eprint(f"[stage3] remote inference enabled: {infer_url}")
+        try:
+            sent_probs, rate_probs = infer_probs_remote(
+                texts=texts,
+                max_len=max_len,
+                batch=batch,
+                infer_url=infer_url,
+                token=infer_token,
+                timeout_s=float(os.getenv("RS_REMOTE_TIMEOUT_S", "180")),
+            )
+        except Exception as ex:
+            eprint(f"[warn] remote inference failed ({type(ex).__name__}: {ex}). Falling back to local inference.")
+            infer_url = ""  # fall back
+    if not infer_url:
+        eprint("[stage3] loading sentiment tokenizer...")
+        sent_tok = load_tokenizer(sent_model_dir)
+        eprint("[stage3] loading sentiment model...")
+        sent_model = load_model(sent_model_dir, device)
+
+        eprint("[stage3] loading rating tokenizer...")
+        rate_tok = load_tokenizer(rate_model_dir)
+        eprint("[stage3] loading rating model...")
+        rate_model = load_model(rate_model_dir, device)
+
+        sent_probs = infer_probs(sent_model, sent_tok, texts, device, max_len, batch, desc="sentiment")  # 3
+        rate_probs = infer_probs(rate_model, rate_tok, texts, device, max_len, batch, desc="rating")  # 5
 
     if sent_probs and len(sent_probs[0]) != 3:
         eprint(f"[warn] sentiment head size={len(sent_probs[0])}, expected 3 (neg/neu/pos)")
@@ -1361,15 +1589,34 @@ def format_context(items: List[Tuple[float, Dict[str, Any]]], max_chars_each: in
 
 def rag_answer(question: str, ctx: List[Dict[str, Any]], llm_cfg: LLMProviderConfig) -> str:
     system = (
-        "Ты аналитик отзывов. Отвечай ТОЛЬКО опираясь на предоставленные отзывы.\n"
-        "Если в отзывах нет ответа — так и скажи.\n"
-        "Формат:\n"
-        "1) Короткий ответ (1-3 предложения)\n"
-        "2) Детали (маркированный список)\n"
-        "3) Доказательства: список (id: короткая цитата до 20 слов)\n"
-        "Правила:\n"
-        "- НЕ выдумывай факты.\n"
-        "- На каждый важный тезис укажи 1-3 id отзывов.\n"
+        "Ты эксперт по анализу отзывов. Твоя задача — дать чёткий, лаконичный ответ на вопрос пользователя, "
+        "опираясь ТОЛЬКО на предоставленные отзывы.\n"
+        "\n"
+        "ФОРМАТ ОТВЕТА:\n"
+        "Начинай сразу с сути, без заголовков и нумерации.\n"
+        "\n"
+        "Структура (БЕЗ MARKDOWN):\n"
+        "• Первый абзац (2-4 предложения): краткий ответ с ключевыми фактами\n"
+        "• Детали через абзацы:\n"
+        "  - Что хвалят (если есть)\n"
+        "  - Что критикуют (если есть)\n"
+        "  - Частота упоминаний ('большинство' / 'несколько человек' / 'единичные случаи')\n"
+        "• Последний абзац: практический вывод для покупателя\n"
+        "\n"
+        "ПРАВИЛА:\n"
+        "✓ Пиши простым языком, без звёздочек, заголовков, маркеров\n"
+        "✓ Используй абзацы для разделения мыслей\n"
+        "✓ Приводи конкретные цитаты в кавычках, но БЕЗ упоминания ID\n"
+        "✓ Указывай количество: 'почти все', '7 из 10', 'несколько', 'один покупатель'\n"
+        "✓ Будь объективен: покажи и плюсы, и минусы\n"
+        "✓ Если противоречия — так и скажи: 'мнения разделились'\n"
+        "\n"
+        "✗ НЕ выдумывай факты\n"
+        "✗ НЕ используй markdown (**, ##, -)\n"
+        "✗ НЕ пиши 'Краткий вывод:', 'Детальный анализ:' и т.п.\n"
+        "✗ НЕ упоминай ID, trust score, технические детали\n"
+        "\n"
+        "Если в отзывах нет ответа — честно скажи об этом.\n"
     )
     user = f"Вопрос: {question}\n\nОтзывы (JSON):\n{json.dumps(ctx, ensure_ascii=False)}"
     return llm_generate([{"role": "system", "content": system}, {"role": "user", "content": user}], llm_cfg)
@@ -1532,9 +1779,6 @@ def cmd_run(args: argparse.Namespace) -> None:
         batch=args.batch,
         max_len=args.max_len,
         device_str=args.device,
-        quant=args.quant,
-        num_threads=args.num_threads,
-        num_interop_threads=args.num_interop_threads,
         topk=args.topk,
         suspicious_thr=args.suspicious_thr,
         debug=args.debug,
@@ -1589,9 +1833,6 @@ def cmd_stage3(args: argparse.Namespace) -> None:
         batch=args.batch,
         max_len=args.max_len,
         device_str=args.device,
-        quant=args.quant,
-        num_threads=args.num_threads,
-        num_interop_threads=args.num_interop_threads,
         topk=args.topk,
         suspicious_thr=args.suspicious_thr,
         debug=args.debug,
@@ -1651,9 +1892,6 @@ def build_parser() -> argparse.ArgumentParser:
         pp.add_argument("--batch", type=int, default=64)
         pp.add_argument("--max_len", type=int, default=256)
         pp.add_argument("--device", default="cuda")
-        pp.add_argument("--quant", default="auto", choices=["auto", "none", "int8"])
-        pp.add_argument("--num_threads", type=int, default=0)
-        pp.add_argument("--num_interop_threads", type=int, default=0)
         pp.add_argument("--topk", type=int, default=8)
         pp.add_argument("--suspicious_thr", type=float, default=0.30)
         pp.add_argument("--debug", action="store_true")
