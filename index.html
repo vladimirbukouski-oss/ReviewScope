@@ -1115,6 +1115,103 @@
           color: var(--text-muted);
         }
 
+        /* ===== NEURAL NETWORK ANIMATION ===== */
+        .neural-network {
+          position: absolute;
+          top: 0; left: 0; right: 0; bottom: 0;
+          overflow: hidden;
+          pointer-events: none;
+        }
+
+        .neural-node {
+          position: absolute;
+          width: 8px;
+          height: 8px;
+          background: var(--accent-primary);
+          border-radius: 50%;
+          box-shadow: 0 0 20px var(--accent-glow), 0 0 40px var(--accent-glow);
+          animation: pulse-node 2s ease-in-out infinite;
+        }
+
+        .neural-node::before {
+          content: '';
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          width: 200px;
+          height: 1px;
+          background: linear-gradient(90deg, var(--accent-glow), transparent);
+          transform-origin: left center;
+          animation: rotate-line 8s linear infinite;
+        }
+
+        @keyframes pulse-node {
+          0%, 100% { opacity: 0.3; transform: scale(1); }
+          50% { opacity: 0.8; transform: scale(1.5); }
+        }
+
+        @keyframes rotate-line {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        .neural-connection {
+          position: absolute;
+          height: 1px;
+          background: linear-gradient(90deg, transparent, var(--accent-glow), transparent);
+          animation: flow-data 3s ease-in-out infinite;
+          opacity: 0.4;
+        }
+
+        @keyframes flow-data {
+          0% { opacity: 0.1; background-position: -200% 0; }
+          50% { opacity: 0.6; }
+          100% { opacity: 0.1; background-position: 200% 0; }
+        }
+
+        .data-particle {
+          position: absolute;
+          width: 4px;
+          height: 4px;
+          background: var(--accent-secondary);
+          border-radius: 50%;
+          box-shadow: 0 0 10px var(--accent-secondary);
+          animation: float-particle 6s ease-in-out infinite;
+        }
+
+        @keyframes float-particle {
+          0%, 100% { transform: translateY(0) translateX(0); opacity: 0; }
+          10% { opacity: 0.8; }
+          50% { transform: translateY(-50px) translateX(30px); opacity: 0.6; }
+          90% { opacity: 0.8; }
+        }
+
+        /* Loading fun messages */
+        .loading-fun-message {
+          margin-top: 16px;
+          font-size: 14px;
+          color: var(--text-secondary);
+          font-style: italic;
+          min-height: 20px;
+          animation: fade-message 0.5s ease-out;
+        }
+
+        @keyframes fade-message {
+          from { opacity: 0; transform: translateY(5px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+        .loading-emoji {
+          font-size: 32px;
+          margin-bottom: 8px;
+          animation: bounce-emoji 1s ease-in-out infinite;
+        }
+
+        @keyframes bounce-emoji {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-5px); }
+        }
+
         @keyframes fly-left {
           0% { opacity: 0; transform: translateX(60px) scale(0.85); }
           10% { opacity: 0.75; transform: translateX(0) scale(1); }
@@ -1348,11 +1445,83 @@
           );
         };
         
-        const LoadingOverlay = ({ progress, message, sessionId }) => {
+        // Fun loading messages by stage
+        const LOADING_MESSAGES = {
+          fetching: [
+            { emoji: '🔍', text: 'Ищем отзывы на просторах интернета...' },
+            { emoji: '📡', text: 'Подключаемся к серверам магазина...' },
+            { emoji: '🕵️', text: 'Собираем мнения покупателей...' },
+            { emoji: '📦', text: 'Распаковываем данные о товаре...' },
+            { emoji: '🌐', text: 'Сканируем страницы с отзывами...' },
+          ],
+          scoring: [
+            { emoji: '🧠', text: 'Нейросеть изучает каждый отзыв...' },
+            { emoji: '⚖️', text: 'Взвешиваем честность мнений...' },
+            { emoji: '🔬', text: 'Анализируем тональность текста...' },
+            { emoji: '🎯', text: 'Выявляем накрученные отзывы...' },
+            { emoji: '💡', text: 'ИИ думает над оценками...' },
+            { emoji: '🤖', text: 'Модели обрабатывают текст...' },
+          ],
+          building_rag: [
+            { emoji: '🏗️', text: 'Строим базу знаний о товаре...' },
+            { emoji: '🔗', text: 'Связываем факты воедино...' },
+            { emoji: '📚', text: 'Индексируем полезную информацию...' },
+            { emoji: '🧩', text: 'Собираем пазл из отзывов...' },
+            { emoji: '🗂️', text: 'Организуем данные для поиска...' },
+          ],
+          summarizing: [
+            { emoji: '✍️', text: 'Пишем честную сводку...' },
+            { emoji: '🎨', text: 'Оформляем результаты анализа...' },
+            { emoji: '📝', text: 'Формулируем выводы...' },
+            { emoji: '🌟', text: 'Готовим вердикт для вас...' },
+            { emoji: '🏆', text: 'Финальные штрихи...' },
+          ],
+        };
+
+        const LoadingOverlay = ({ progress, message, sessionId, status }) => {
           const [flyingReviews, setFlyingReviews] = useState([]);
+          const [funMessage, setFunMessage] = useState({ emoji: '🚀', text: 'Запускаем анализ...' });
+          const [nodes, setNodes] = useState([]);
+          const [particles, setParticles] = useState([]);
           const lastSeenRef = useRef(0);
           const keyRef = useRef(0);
 
+          // Generate neural network nodes
+          useEffect(() => {
+            const newNodes = Array.from({ length: 12 }, (_, i) => ({
+              id: i,
+              x: Math.random() * 100,
+              y: Math.random() * 100,
+              delay: Math.random() * 2,
+              size: 6 + Math.random() * 6,
+            }));
+            setNodes(newNodes);
+
+            const newParticles = Array.from({ length: 20 }, (_, i) => ({
+              id: i,
+              x: Math.random() * 100,
+              y: Math.random() * 100,
+              delay: Math.random() * 6,
+              duration: 4 + Math.random() * 4,
+            }));
+            setParticles(newParticles);
+          }, []);
+
+          // Rotate fun messages
+          useEffect(() => {
+            const messages = LOADING_MESSAGES[status] || LOADING_MESSAGES.fetching;
+            const interval = setInterval(() => {
+              const randomMsg = messages[Math.floor(Math.random() * messages.length)];
+              setFunMessage(randomMsg);
+            }, 3000);
+
+            // Set initial message
+            setFunMessage(messages[Math.floor(Math.random() * messages.length)]);
+
+            return () => clearInterval(interval);
+          }, [status]);
+
+          // Fetch reviews for animation
           useEffect(() => {
             if (!sessionId || progress < 30) return;
 
@@ -1386,7 +1555,36 @@
 
           return (
             <div className="loading-overlay">
-              {/* Flying reviews background */}
+              {/* Neural network background */}
+              <div className="neural-network">
+                {nodes.map(node => (
+                  <div
+                    key={node.id}
+                    className="neural-node"
+                    style={{
+                      left: `${node.x}%`,
+                      top: `${node.y}%`,
+                      width: `${node.size}px`,
+                      height: `${node.size}px`,
+                      animationDelay: `${node.delay}s`,
+                    }}
+                  />
+                ))}
+                {particles.map(p => (
+                  <div
+                    key={`p-${p.id}`}
+                    className="data-particle"
+                    style={{
+                      left: `${p.x}%`,
+                      top: `${p.y}%`,
+                      animationDelay: `${p.delay}s`,
+                      animationDuration: `${p.duration}s`,
+                    }}
+                  />
+                ))}
+              </div>
+
+              {/* Flying reviews */}
               <div className="flying-reviews-container">
                 {flyingReviews.map(review => (
                   <div
@@ -1414,21 +1612,22 @@
 
               {/* Center content */}
               <div className="loading-content">
+                <div className="loading-emoji">{funMessage.emoji}</div>
                 <div className="loading-spinner" />
                 <div className="loading-text">{message || 'Анализируем'}</div>
-                <div className="loading-subtext">10-20 секунд</div>
+                <div className="loading-fun-message" key={funMessage.text}>{funMessage.text}</div>
                 <div className="loading-progress">
                   <div className="progress-bar">
                     <div className="progress-fill" style={{ width: `${progress}%` }} />
                   </div>
                   <div className="progress-steps">
-                    <span className={`step ${progress >= 30 ? 'done' : progress > 0 ? 'active' : ''}`}>Сбор</span>
-                    <span className={`step ${progress >= 60 ? 'done' : progress >= 30 ? 'active' : ''}`}>Анализ</span>
-                    <span className={`step ${progress >= 80 ? 'done' : progress >= 60 ? 'active' : ''}`}>Индекс</span>
-                    <span className={`step ${progress >= 100 ? 'done' : progress >= 80 ? 'active' : ''}`}>Сводка</span>
+                    <span className={`step ${progress >= 30 ? 'done' : progress > 0 ? 'active' : ''}`}>📥 Сбор</span>
+                    <span className={`step ${progress >= 60 ? 'done' : progress >= 30 ? 'active' : ''}`}>🧠 Анализ</span>
+                    <span className={`step ${progress >= 80 ? 'done' : progress >= 60 ? 'active' : ''}`}>📊 Индекс</span>
+                    <span className={`step ${progress >= 100 ? 'done' : progress >= 80 ? 'active' : ''}`}>✨ Сводка</span>
                   </div>
                   {lastSeenRef.current > 0 && (
-                    <div className="reviews-count">Обработано отзывов: {lastSeenRef.current}</div>
+                    <div className="reviews-count">📝 Обработано отзывов: {lastSeenRef.current}</div>
                   )}
                 </div>
               </div>
@@ -1831,7 +2030,7 @@
                 )}
               </div>
 
-              {isAnalyzing && <LoadingOverlay progress={analysisStatus.progress} message={analysisStatus.message} sessionId={sessionId} />}
+              {isAnalyzing && <LoadingOverlay progress={analysisStatus.progress} message={analysisStatus.message} sessionId={sessionId} status={analysisStatus.status} />}
             </div>
           );
         }
