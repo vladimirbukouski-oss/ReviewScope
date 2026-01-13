@@ -1050,7 +1050,85 @@
           color: var(--accent-primary);
           font-weight: 700;
         }
-        
+
+        /* ===== FLYING REVIEWS ===== */
+        .flying-reviews-container {
+          position: absolute;
+          top: 0; left: 0; right: 0; bottom: 0;
+          overflow: hidden;
+          pointer-events: none;
+        }
+
+        .flying-review {
+          position: absolute;
+          max-width: 280px;
+          padding: 12px 16px;
+          background: rgba(22, 22, 31, 0.7);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 12px;
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+          transform-origin: center;
+          will-change: transform, opacity;
+        }
+
+        .flying-review-header {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 6px;
+        }
+
+        .flying-review-user {
+          font-size: 11px;
+          color: var(--text-muted);
+        }
+
+        .flying-review-stars {
+          display: flex;
+          gap: 2px;
+        }
+
+        .flying-review-star {
+          font-size: 10px;
+          color: var(--bg-tertiary);
+        }
+
+        .flying-review-star.filled {
+          color: #facc15;
+        }
+
+        .flying-review-text {
+          font-size: 12px;
+          color: var(--text-secondary);
+          line-height: 1.4;
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+
+        .reviews-count {
+          margin-top: 12px;
+          font-size: 13px;
+          color: var(--text-muted);
+        }
+
+        @keyframes fly-left {
+          0% { opacity: 0; transform: translateX(60px) scale(0.85); }
+          10% { opacity: 0.75; transform: translateX(0) scale(1); }
+          90% { opacity: 0.75; transform: translateX(-120px) scale(1); }
+          100% { opacity: 0; transform: translateX(-180px) scale(0.85); }
+        }
+
+        @keyframes fly-right {
+          0% { opacity: 0; transform: translateX(-60px) scale(0.85); }
+          10% { opacity: 0.75; transform: translateX(0) scale(1); }
+          90% { opacity: 0.75; transform: translateX(120px) scale(1); }
+          100% { opacity: 0; transform: translateX(180px) scale(0.85); }
+        }
+
         /* ===== DESKTOP STYLES ===== */
         @media (min-width: 768px) {
           .container { padding: 0 24px; }
@@ -1270,26 +1348,93 @@
           );
         };
         
-        const LoadingOverlay = ({ progress, message }) => (
-          <div className="loading-overlay">
-            <div className="loading-content">
-              <div className="loading-spinner" />
-              <div className="loading-text">{message || 'Анализируем'}</div>
-              <div className="loading-subtext">10-20 секунд</div>
-              <div className="loading-progress">
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${progress}%` }} />
-                </div>
-                <div className="progress-steps">
-                  <span className={`step ${progress >= 30 ? 'done' : progress > 0 ? 'active' : ''}`}>Сбор</span>
-                  <span className={`step ${progress >= 60 ? 'done' : progress >= 30 ? 'active' : ''}`}>Анализ</span>
-                  <span className={`step ${progress >= 80 ? 'done' : progress >= 60 ? 'active' : ''}`}>Индекс</span>
-                  <span className={`step ${progress >= 100 ? 'done' : progress >= 80 ? 'active' : ''}`}>Сводка</span>
+        const LoadingOverlay = ({ progress, message, sessionId }) => {
+          const [flyingReviews, setFlyingReviews] = useState([]);
+          const lastSeenRef = useRef(0);
+          const keyRef = useRef(0);
+
+          useEffect(() => {
+            if (!sessionId || progress < 30) return;
+
+            const fetchReviews = async () => {
+              try {
+                const res = await fetch(`${API_BASE}/reviews-stream/${sessionId}?last_seen=${lastSeenRef.current}`);
+                if (!res.ok) return;
+                const data = await res.json();
+
+                if (data.reviews && data.reviews.length > 0) {
+                  const newFlying = data.reviews.map((r, i) => ({
+                    ...r,
+                    key: `fr-${keyRef.current++}`,
+                    x: Math.random() * 70 + 15,
+                    y: Math.random() * 50 + 25,
+                    duration: 10 + Math.random() * 6,
+                    delay: i * 0.4,
+                    direction: Math.random() > 0.5 ? 'left' : 'right',
+                  }));
+
+                  setFlyingReviews(prev => [...prev, ...newFlying].slice(-15));
+                  lastSeenRef.current = data.next_index;
+                }
+              } catch (e) {}
+            };
+
+            fetchReviews();
+            const interval = setInterval(fetchReviews, 2500);
+            return () => clearInterval(interval);
+          }, [sessionId, progress]);
+
+          return (
+            <div className="loading-overlay">
+              {/* Flying reviews background */}
+              <div className="flying-reviews-container">
+                {flyingReviews.map(review => (
+                  <div
+                    key={review.key}
+                    className="flying-review"
+                    style={{
+                      left: `${review.x}%`,
+                      top: `${review.y}%`,
+                      animation: `fly-${review.direction} ${review.duration}s linear ${review.delay}s forwards`,
+                      opacity: 0,
+                    }}
+                  >
+                    <div className="flying-review-header">
+                      <span className="flying-review-user">{review.user}</span>
+                      <div className="flying-review-stars">
+                        {[1,2,3,4,5].map(s => (
+                          <span key={s} className={`flying-review-star ${s <= review.rating ? 'filled' : ''}`}>★</span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="flying-review-text">{review.text}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Center content */}
+              <div className="loading-content">
+                <div className="loading-spinner" />
+                <div className="loading-text">{message || 'Анализируем'}</div>
+                <div className="loading-subtext">10-20 секунд</div>
+                <div className="loading-progress">
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${progress}%` }} />
+                  </div>
+                  <div className="progress-steps">
+                    <span className={`step ${progress >= 30 ? 'done' : progress > 0 ? 'active' : ''}`}>Сбор</span>
+                    <span className={`step ${progress >= 60 ? 'done' : progress >= 30 ? 'active' : ''}`}>Анализ</span>
+                    <span className={`step ${progress >= 80 ? 'done' : progress >= 60 ? 'active' : ''}`}>Индекс</span>
+                    <span className={`step ${progress >= 100 ? 'done' : progress >= 80 ? 'active' : ''}`}>Сводка</span>
+                  </div>
+                  {lastSeenRef.current > 0 && (
+                    <div className="reviews-count">Обработано отзывов: {lastSeenRef.current}</div>
+                  )}
                 </div>
               </div>
             </div>
-          </div>
-        );
+          );
+        };
         
         // Main App
         function App() {
@@ -1686,7 +1831,7 @@
                 )}
               </div>
 
-              {isAnalyzing && <LoadingOverlay progress={analysisStatus.progress} message={analysisStatus.message} />}
+              {isAnalyzing && <LoadingOverlay progress={analysisStatus.progress} message={analysisStatus.message} sessionId={sessionId} />}
             </div>
           );
         }
