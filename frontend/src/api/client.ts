@@ -2,7 +2,9 @@
  * ReviewScope API Client
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+// Railway backend URL - fallback to /api for local dev
+const API_BASE = import.meta.env.VITE_API_URL ||
+  (window.location.hostname === 'localhost' ? '/api' : 'https://reviewscope-api-production.up.railway.app');
 
 export interface AnalysisStatus {
   session_id: string;

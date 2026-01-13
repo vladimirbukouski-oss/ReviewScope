@@ -32,7 +32,8 @@ const STEPS = [
   { key: 'summarizing', label: 'Сводка', icon: '✨' },
 ];
 
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+const API_BASE = import.meta.env.VITE_API_URL ||
+  (window.location.hostname === 'localhost' ? '/api' : 'https://reviewscope-api-production.up.railway.app');
 
 export function LoadingOverlay({ status }: LoadingOverlayProps) {
   const currentStepIndex = STEPS.findIndex((s) => s.key === status.status);
