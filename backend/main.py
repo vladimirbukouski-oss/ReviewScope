@@ -16,12 +16,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 import uvicorn
 from dotenv import load_dotenv
 import requests
+
+# Database imports - handle both module and script execution
+try:
+    from .database import get_db, init_db, SessionLocal
+    from .repository import AnalysisRepository, UserAnalysisRepository, AnalysisViewRepository
+    from .models import Analysis
+except ImportError:
+    from database import get_db, init_db, SessionLocal
+    from repository import AnalysisRepository, UserAnalysisRepository, AnalysisViewRepository
+    from models import Analysis
 
 # Load .env
 load_dotenv()
@@ -77,9 +89,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage
-sessions: Dict[str, Dict[str, Any]] = {}
+# In-memory storage (fallback + active tasks)
+sessions: Dict[str, Dict[str, Any]] = {}  # For backward compatibility during migration
 analysis_tasks: Dict[str, asyncio.Task] = {}
+
+# Flag to use database (can be disabled for testing)
+USE_DATABASE = os.getenv("USE_DATABASE", "true").lower() == "true"
 
 # ============================================================
 # Config - пути адаптированы под твою структуру
@@ -280,6 +295,14 @@ def load_reviewscope_module():
 
 @app.on_event("startup")
 async def startup_event():
+    # Initialize database tables
+    if USE_DATABASE:
+        try:
+            init_db()
+            print("[DB] Database initialized successfully")
+        except Exception as e:
+            print(f"[DB] Warning: Could not initialize database: {e}")
+
     # Download models in background so healthcheck can pass quickly.
     asyncio.create_task(asyncio.to_thread(ensure_models_available))
 
@@ -287,9 +310,29 @@ async def startup_event():
 # Background Analysis Task
 # ============================================================
 
+def update_analysis_status(session_id: str, status: str, progress: int, message: str, error: str = None):
+    """Update status in both memory and database"""
+    # Update in-memory
+    if session_id in sessions:
+        sessions[session_id]["status"] = status
+        sessions[session_id]["progress"] = progress
+        sessions[session_id]["message"] = message
+        if error:
+            sessions[session_id]["error"] = error
+
+    # Update in database
+    if USE_DATABASE:
+        try:
+            db = SessionLocal()
+            AnalysisRepository.update_status(db, session_id, status, progress, message, error)
+            db.close()
+        except Exception as e:
+            print(f"[DB] Warning: Could not update status: {e}")
+
+
 async def run_analysis(session_id: str, url: str):
     """Фоновая задача анализа"""
-    session = sessions[session_id]
+    session = sessions.get(session_id, {})
 
     try:
         rs = load_reviewscope_module()
@@ -298,9 +341,7 @@ async def run_analysis(session_id: str, url: str):
         out_dir.mkdir(exist_ok=True)
 
         # Stage 1: Fetching
-        session["status"] = "fetching"
-        session["progress"] = 10
-        session["message"] = "Собираем отзывы..."
+        update_analysis_status(session_id, "fetching", 10, "Собираем отзывы...")
 
         service = detect_service(url)
         session["service"] = service
@@ -308,9 +349,7 @@ async def run_analysis(session_id: str, url: str):
         loop = asyncio.get_event_loop()
 
         # Stage 3: Build bundle
-        session["status"] = "scoring"
-        session["progress"] = 30
-        session["message"] = "Анализируем тональность и доверие..."
+        update_analysis_status(session_id, "scoring", 30, "Анализируем тональность и доверие...")
 
         bundle_path = await loop.run_in_executor(
             None,
@@ -333,11 +372,9 @@ async def run_analysis(session_id: str, url: str):
             )
         )
 
-        session["progress"] = 60
-        session["message"] = "Строим поисковый индекс..."
+        update_analysis_status(session_id, "building_rag", 60, "Строим поисковый индекс...")
 
         # Stage 4: RAG build
-        session["status"] = "building_rag"
         rag_dir = out_dir / "rag"
 
         await loop.run_in_executor(
@@ -350,12 +387,9 @@ async def run_analysis(session_id: str, url: str):
             )
         )
 
-        session["progress"] = 80
-        session["message"] = "Генерируем AI-сводку..."
+        update_analysis_status(session_id, "summarizing", 80, "Генерируем AI-сводку...")
 
         # Stage 4: Summarize
-        session["status"] = "summarizing"
-
         summary_obj, reviews = rs.load_stage3_bundle(bundle_path)
         llm_cfg = rs.LLMProviderConfig(provider=LLM_PROVIDER, model=LLM_MODEL, temperature=0.2)
 
@@ -364,11 +398,11 @@ async def run_analysis(session_id: str, url: str):
             lambda: rs.summarize_product(summary_obj, reviews, llm_cfg, max_evidence=90)
         )
 
-        # Save
+        # Save to file
         summary_path = out_dir / "stage4_summary.json"
         rs.write_json(summary_path, stage4_summary)
 
-        # Store in session
+        # Store in memory session
         session["bundle_path"] = str(bundle_path)
         session["rag_dir"] = str(rag_dir)
         session["summary_obj"] = summary_obj
@@ -378,14 +412,34 @@ async def run_analysis(session_id: str, url: str):
         session["progress"] = 100
         session["message"] = "Готово!"
 
+        # Store in database
+        if USE_DATABASE:
+            try:
+                db = SessionLocal()
+                AnalysisRepository.update_results(
+                    db,
+                    session_id,
+                    summary_data=summary_obj,
+                    stage4_summary=stage4_summary,
+                    bundle_path=str(bundle_path),
+                    rag_dir=str(rag_dir)
+                )
+                db.close()
+            except Exception as e:
+                print(f"[DB] Warning: Could not save results: {e}")
+
         print(f"[OK] Analysis complete for {session_id}")
 
     except Exception as e:
         import traceback
+        error_msg = str(e)
         session["status"] = "error"
-        session["message"] = f"Ошибка: {str(e)}"
-        session["error"] = str(e)
+        session["message"] = f"Ошибка: {error_msg}"
+        session["error"] = error_msg
         session["traceback"] = traceback.format_exc()
+
+        update_analysis_status(session_id, "error", 0, f"Ошибка: {error_msg}", error_msg)
+
         print(f"[ERROR] {session_id}: {e}")
         print(traceback.format_exc())
 
@@ -421,8 +475,41 @@ async def start_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks)
         raise HTTPException(400, "URL не может быть пустым")
 
     cache_key = url_to_cache_key(url)
+    service = detect_service(url)
 
-    # Check cache
+    # Check cache in database first
+    if req.use_cache and USE_DATABASE:
+        try:
+            db = SessionLocal()
+            cached = AnalysisRepository.get_by_cache_key(db, cache_key, status="ready")
+            if cached:
+                # Load into memory if not present
+                if cached.id not in sessions:
+                    sessions[cached.id] = {
+                        "url": cached.url,
+                        "cache_key": cached.cache_key,
+                        "status": "ready",
+                        "progress": 100,
+                        "message": "Загружено из кэша",
+                        "service": cached.service,
+                        "bundle_path": cached.bundle_path,
+                        "rag_dir": cached.rag_dir,
+                        "summary_obj": cached.summary_data,
+                        "stage4_summary": cached.stage4_summary,
+                        "reviews": [],  # Will be loaded on demand
+                    }
+                db.close()
+                return AnalysisStatus(
+                    session_id=cached.id,
+                    status="ready",
+                    progress=100,
+                    message="Загружено из кэша"
+                )
+            db.close()
+        except Exception as e:
+            print(f"[DB] Warning: Cache check failed: {e}")
+
+    # Check in-memory cache
     if req.use_cache:
         for sid, sess in sessions.items():
             if sess.get("cache_key") == cache_key and sess.get("status") == "ready":
@@ -442,7 +529,17 @@ async def start_analysis(req: AnalyzeRequest, background_tasks: BackgroundTasks)
         "progress": 0,
         "message": "Запуск анализа...",
         "created_at": datetime.now().isoformat(),
+        "service": service,
     }
+
+    # Create in database
+    if USE_DATABASE:
+        try:
+            db = SessionLocal()
+            AnalysisRepository.create(db, session_id, url, cache_key, service)
+            db.close()
+        except Exception as e:
+            print(f"[DB] Warning: Could not create analysis record: {e}")
 
     # Start background task
     task = asyncio.create_task(run_analysis(session_id, url))
@@ -594,6 +691,117 @@ async def list_sessions():
         }
         for sid, s in sessions.items()
     }
+
+
+# ============================================================
+# History & Recent Analyses (Database-powered)
+# ============================================================
+
+@app.get("/analyses/recent")
+async def get_recent_analyses(limit: int = 20, offset: int = 0):
+    """Get recently completed analyses (for homepage)"""
+    if not USE_DATABASE:
+        # Fallback to in-memory
+        ready_sessions = [
+            {
+                "session_id": sid,
+                "url": s.get("url"),
+                "service": s.get("service"),
+                "truth_stars": s.get("summary_obj", {}).get("stars", {}).get("truth_stars"),
+                "total_reviews": s.get("summary_obj", {}).get("counts", {}).get("raw"),
+                "product_name": s.get("stage4_summary", {}).get("one_liner", "")[:100],
+                "created_at": s.get("created_at"),
+            }
+            for sid, s in sessions.items()
+            if s.get("status") == "ready"
+        ]
+        return {
+            "total": len(ready_sessions),
+            "analyses": ready_sessions[offset:offset + limit]
+        }
+
+    try:
+        db = SessionLocal()
+        analyses = AnalysisRepository.get_recent(db, limit=limit, offset=offset)
+        total = AnalysisRepository.count_ready(db)
+        db.close()
+
+        return {
+            "total": total,
+            "analyses": [
+                {
+                    "session_id": a.id,
+                    "url": a.url,
+                    "service": a.service,
+                    "truth_stars": a.truth_stars,
+                    "avg_orig_stars": a.avg_orig_stars,
+                    "total_reviews": a.total_reviews,
+                    "kept_reviews": a.kept_reviews,
+                    "product_name": a.product_name[:100] if a.product_name else None,
+                    "sentiment_mix": a.sentiment_mix,
+                    "created_at": a.created_at.isoformat() if a.created_at else None,
+                }
+                for a in analyses
+            ]
+        }
+    except Exception as e:
+        print(f"[DB] Error fetching recent analyses: {e}")
+        raise HTTPException(500, "Ошибка получения истории")
+
+
+@app.get("/analysis/{session_id}/meta")
+async def get_analysis_meta(session_id: str, request: Request):
+    """Get analysis metadata for SEO/sharing (lightweight endpoint)"""
+    # Try database first
+    if USE_DATABASE:
+        try:
+            db = SessionLocal()
+            analysis = AnalysisRepository.get_by_id(db, session_id)
+            if analysis and analysis.status == "ready":
+                # Record view
+                ip_hash = hashlib.md5(
+                    (request.client.host or "unknown").encode()
+                ).hexdigest()[:16]
+                AnalysisViewRepository.record_view(
+                    db, session_id,
+                    ip_hash=ip_hash,
+                    user_agent=request.headers.get("user-agent"),
+                    referer=request.headers.get("referer")
+                )
+                db.close()
+
+                return {
+                    "session_id": analysis.id,
+                    "url": analysis.url,
+                    "service": analysis.service,
+                    "product_name": analysis.product_name,
+                    "truth_stars": analysis.truth_stars,
+                    "total_reviews": analysis.total_reviews,
+                    "one_liner": analysis.stage4_summary.get("one_liner") if analysis.stage4_summary else None,
+                    "score": analysis.stage4_summary.get("score") if analysis.stage4_summary else None,
+                }
+            db.close()
+        except Exception as e:
+            print(f"[DB] Error fetching meta: {e}")
+
+    # Fallback to in-memory
+    if session_id in sessions and sessions[session_id].get("status") == "ready":
+        sess = sessions[session_id]
+        stage4 = sess.get("stage4_summary", {})
+        summary_obj = sess.get("summary_obj", {})
+        return {
+            "session_id": session_id,
+            "url": sess.get("url"),
+            "service": sess.get("service"),
+            "product_name": stage4.get("one_liner", "")[:100],
+            "truth_stars": summary_obj.get("stars", {}).get("truth_stars"),
+            "total_reviews": summary_obj.get("counts", {}).get("raw"),
+            "one_liner": stage4.get("one_liner"),
+            "score": stage4.get("score"),
+        }
+
+    raise HTTPException(404, "Анализ не найден")
+
 
 # ============================================================
 # Run
