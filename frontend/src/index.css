@@ -113,3 +113,61 @@ body {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+
+/* Flying reviews animation */
+@keyframes fly-left {
+  0% {
+    opacity: 0;
+    transform: translateX(50px) scale(0.8);
+  }
+  10% {
+    opacity: 0.7;
+    transform: translateX(0) scale(1);
+  }
+  90% {
+    opacity: 0.7;
+    transform: translateX(-100px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-150px) scale(0.8);
+  }
+}
+
+@keyframes fly-right {
+  0% {
+    opacity: 0;
+    transform: translateX(-50px) scale(0.8);
+  }
+  10% {
+    opacity: 0.7;
+    transform: translateX(0) scale(1);
+  }
+  90% {
+    opacity: 0.7;
+    transform: translateX(100px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(150px) scale(0.8);
+  }
+}
+
+.flying-review {
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+/* Subtle floating effect for reviews */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.flying-review:nth-child(odd) {
+  animation-timing-function: ease-in-out;
+}
+
+.flying-review:nth-child(even) {
+  animation-timing-function: linear;
+}

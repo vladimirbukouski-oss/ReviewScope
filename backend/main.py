@@ -372,6 +372,13 @@ async def run_analysis(session_id: str, url: str):
             )
         )
 
+        # Load reviews for streaming animation
+        try:
+            _, raw_reviews = rs.load_stage3_bundle(bundle_path)
+            session["raw_reviews"] = raw_reviews
+        except Exception:
+            session["raw_reviews"] = []
+
         update_analysis_status(session_id, "building_rag", 60, "Строим поисковый индекс...")
 
         # Stage 4: RAG build
@@ -690,6 +697,39 @@ async def list_sessions():
             "progress": s.get("progress"),
         }
         for sid, s in sessions.items()
+    }
+
+
+@app.get("/reviews-stream/{session_id}")
+async def get_reviews_stream(session_id: str, last_seen: int = 0):
+    """Get reviews collected so far during analysis (for flying reviews animation)"""
+    if session_id not in sessions:
+        raise HTTPException(404, "Сессия не найдена")
+
+    sess = sessions[session_id]
+    raw_reviews = sess.get("raw_reviews", [])
+
+    # Return only new reviews since last_seen index
+    new_reviews = raw_reviews[last_seen:last_seen + 10]
+
+    formatted = []
+    for r in new_reviews:
+        text = r.get("text", "")
+        # Truncate for animation display
+        if len(text) > 150:
+            text = text[:150] + "..."
+        formatted.append({
+            "id": str(r.get("id", "")),
+            "text": text,
+            "rating": int(r.get("orig_star", 0) or 0),
+            "user": r.get("user", "Покупатель") or "Покупатель",
+        })
+
+    return {
+        "reviews": formatted,
+        "total": len(raw_reviews),
+        "next_index": last_seen + len(new_reviews),
+        "status": sess.get("status", "pending"),
     }
 
 
