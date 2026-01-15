@@ -255,6 +255,7 @@ def detect_service(url_or_id: str) -> str:
 # ============================================================
 
 ON_REVIEWS_URL = "https://catalog.api.onliner.by/products/{key}/reviews"
+ON_PRODUCT_URL = "https://catalog.api.onliner.by/products/{key}"
 ON_STOP_TAILS = {"reviews", "prices", "specs", "description", "offers", "forum"}
 
 
@@ -273,6 +274,52 @@ def on_parse_product_key(url_or_key: str) -> str:
     if tail in ON_STOP_TAILS and len(parts) >= 2:
         return parts[-2]
     return parts[-1]
+
+
+def on_fetch_product_info(s: requests.Session, key: str, debug: bool = False) -> Dict[str, Any]:
+    """Fetch product info from Onliner product API."""
+    info: Dict[str, Any] = {
+        "name": None,
+        "brand": None,
+        "description": None,
+        "category": None,
+    }
+    try:
+        payload = req_json(
+            s,
+            ON_PRODUCT_URL.format(key=key),
+            tries=2,
+            sleep_base=0.3,
+            timeout=(4.0, 15.0),
+            debug=debug,
+        )
+        if isinstance(payload, dict):
+            # Name
+            name = payload.get("name") or payload.get("full_name") or payload.get("name_prefix")
+            if name and isinstance(name, str):
+                info["name"] = name.strip()
+
+            # Brand/Manufacturer
+            brand = payload.get("manufacturer", {})
+            if isinstance(brand, dict):
+                info["brand"] = (brand.get("name") or "").strip() or None
+            elif isinstance(brand, str):
+                info["brand"] = brand.strip() or None
+
+            # Description
+            desc = payload.get("description") or payload.get("micro_description")
+            if desc and isinstance(desc, str):
+                info["description"] = desc.strip()[:500] if len(desc) > 500 else desc.strip()
+
+            # Category
+            cat = payload.get("category")
+            if isinstance(cat, str):
+                info["category"] = cat.strip()
+
+    except Exception as e:
+        if debug:
+            eprint(f"[onliner] failed to fetch product info: {e}")
+    return info
 
 
 def on_fetch_reviews_page(s: requests.Session, key: str, page: int, debug: bool = False) -> Dict[str, Any]:
@@ -337,11 +384,17 @@ def fetch_onliner_reviews(
     per_rating: int,
     sleep_s: float,
     debug: bool,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Fetch Onliner reviews and product info. Returns (reviews, product_info)."""
     key = on_parse_product_key(url)
     eprint(f"[onliner] key={key}")
 
     s = requests.Session()
+
+    # Fetch product info
+    product_info = on_fetch_product_info(s, key, debug=debug)
+    if product_info.get("name"):
+        eprint(f"[onliner] product: {product_info.get('brand', '')} - {product_info['name']}")
     rows: List[Dict[str, Any]] = []
     buckets: Dict[int, List[Dict[str, Any]]] = {1: [], 2: [], 3: [], 4: [], 5: []}
     sampling_mode = False
@@ -398,9 +451,9 @@ def fetch_onliner_reviews(
     if sampling_mode:
         out = stratified_result(buckets)
         eprint(f"[onliner] sampled={len(out)} (<= {per_rating} per rating)")
-        return out
+        return out, product_info
     eprint(f"[onliner] collected={len(rows)}")
-    return rows
+    return rows, product_info
 
 
 # ============================================================
@@ -641,6 +694,82 @@ def wb_extract_imt_id(card_js: Dict[str, Any]) -> int:
     raise RuntimeError("Failed to extract imtId from card.json")
 
 
+def wb_extract_product_info(card_js: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract product name, brand, description from WB card.json"""
+    info: Dict[str, Any] = {
+        "name": None,
+        "brand": None,
+        "description": None,
+        "category": None,
+    }
+
+    # Try direct fields first (card.json format)
+    for name_key in ("imt_name", "subj_name", "name", "title", "nm_name"):
+        v = card_js.get(name_key)
+        if v and isinstance(v, str) and v.strip():
+            info["name"] = v.strip()
+            break
+
+    for brand_key in ("brand", "brand_name", "selling", "supplier"):
+        v = card_js.get(brand_key)
+        if v and isinstance(v, str) and v.strip():
+            info["brand"] = v.strip()
+            break
+
+    for desc_key in ("description", "desc", "full_description"):
+        v = card_js.get(desc_key)
+        if v and isinstance(v, str) and v.strip():
+            info["description"] = v.strip()
+            break
+
+    for cat_key in ("subj_root_name", "category", "subject"):
+        v = card_js.get(cat_key)
+        if v and isinstance(v, str) and v.strip():
+            info["category"] = v.strip()
+            break
+
+    # Try nested "data" -> "products" -> [0] structure (card.wb.ru format)
+    products = None
+    if isinstance(card_js.get("data"), dict):
+        products = card_js["data"].get("products")
+    elif isinstance(card_js.get("products"), list):
+        products = card_js["products"]
+
+    if isinstance(products, list) and products:
+        p0 = products[0]
+        if isinstance(p0, dict):
+            if not info["name"]:
+                for name_key in ("name", "imt_name", "subj_name", "title"):
+                    v = p0.get(name_key)
+                    if v and isinstance(v, str) and v.strip():
+                        info["name"] = v.strip()
+                        break
+            if not info["brand"]:
+                for brand_key in ("brand", "brand_name", "selling"):
+                    v = p0.get(brand_key)
+                    if v and isinstance(v, str) and v.strip():
+                        info["brand"] = v.strip()
+                        break
+            if not info["description"]:
+                for desc_key in ("description", "desc"):
+                    v = p0.get(desc_key)
+                    if v and isinstance(v, str) and v.strip():
+                        info["description"] = v.strip()
+                        break
+            if not info["category"]:
+                for cat_key in ("subj_root_name", "category", "subject"):
+                    v = p0.get(cat_key)
+                    if v and isinstance(v, str) and v.strip():
+                        info["category"] = v.strip()
+                        break
+
+    # Truncate description if too long
+    if info["description"] and len(info["description"]) > 500:
+        info["description"] = info["description"][:500] + "..."
+
+    return info
+
+
 def wb_parse_feedbacks(payload: Any) -> List[Dict[str, Any]]:
     if isinstance(payload, dict):
         if isinstance(payload.get("feedbacks"), list):
@@ -688,14 +817,18 @@ def fetch_wb_reviews(
     fb_from: int,
     fb_to: int,
     debug: bool,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Fetch WB reviews and product info. Returns (reviews, product_info)."""
     nm_id = wb_parse_nm_id(url)
     eprint(f"[wb] nmId={nm_id}")
 
     s = requests.Session()
     card = wb_fetch_card_json(s, nm_id, debug=debug)
     imt_id = wb_extract_imt_id(card)
+    product_info = wb_extract_product_info(card)
     eprint(f"[wb] imtId={imt_id}")
+    if product_info.get("name"):
+        eprint(f"[wb] product: {product_info.get('brand', '')} - {product_info['name']}")
 
     candidates = [f"feedbacks{i}.wb.ru" for i in range(int(fb_from), int(fb_to) + 1)]
     good_hosts = [h for h in candidates if wb_host_resolves(h)]
@@ -804,10 +937,10 @@ def fetch_wb_reviews(
     if sampling_mode and buckets is not None:
         out = stratified_result(buckets)
         eprint(f"[wb] sampled={len(out)} (<= {per_rating} per rating)")
-        return out
+        return out, product_info
 
     eprint(f"[wb] collected={len(rows)}")
-    return rows
+    return rows, product_info
 
 
 # ============================================================
@@ -1130,8 +1263,9 @@ def stage3_build_bundle(
 
     # 1) fetch
     raw_path = out_dir / "reviews_raw.jsonl"
+    product_info: Dict[str, Any] = {}
     if service == "wb":
-        rows = fetch_wb_reviews(
+        rows, product_info = fetch_wb_reviews(
             url=url,
             min_len=min_len_fetch,
             threshold_total=threshold,
@@ -1143,7 +1277,7 @@ def stage3_build_bundle(
             debug=debug,
         )
     else:
-        rows = fetch_onliner_reviews(
+        rows, product_info = fetch_onliner_reviews(
             url=url,
             min_len=min_len_fetch,
             threshold_total=threshold,
@@ -1321,6 +1455,7 @@ def stage3_build_bundle(
         "input": {
             "url": url,
             "service": service,
+            "product": product_info,  # Name, brand, description, category
             "fetch": {
                 "min_len_fetch": min_len_fetch,
                 "threshold": threshold,
@@ -1685,9 +1820,17 @@ def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]]
     except Exception:
         truth_stars = None
 
+    # Extract product info from summary
+    input_obj = summary_obj.get("input", {}) or {}
+    product_info = input_obj.get("product", {}) or {}
+
     meta = {
-        "source_service": _safe_str((summary_obj.get("input", {}) or {}).get("service")) if isinstance(summary_obj.get("input"), dict) else _safe_str(summary_obj.get("service")),
-        "url": _safe_str((summary_obj.get("input", {}) or {}).get("url")) if isinstance(summary_obj.get("input"), dict) else _safe_str(summary_obj.get("url")),
+        "source_service": _safe_str(input_obj.get("service")) if isinstance(input_obj, dict) else _safe_str(summary_obj.get("service")),
+        "url": _safe_str(input_obj.get("url")) if isinstance(input_obj, dict) else _safe_str(summary_obj.get("url")),
+        "product_name": product_info.get("name"),
+        "product_brand": product_info.get("brand"),
+        "product_description": product_info.get("description"),
+        "product_category": product_info.get("category"),
         "counts": summary_obj.get("counts"),
         "truth_stars": truth_stars,
         "suspicious_share": susp,
@@ -1695,6 +1838,10 @@ def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]]
 
     system = (
         "Ты — эксперт-аналитик отзывов. Твоя задача — создать честную и полезную сводку по товару.\n\n"
+        "КОНТЕКСТ О ТОВАРЕ:\n"
+        "В метаданных указаны product_name, product_brand, product_description, product_category — \n"
+        "используй эту информацию чтобы лучше понять что это за товар и давать более релевантные выводы.\n"
+        "Например, если это одежда — акцентируй на размерах/посадке, если электроника — на функционале и надёжности.\n\n"
         "Верни СТРОГО JSON (без текста вокруг) по схеме:\n"
         "{\n"
         "  \"one_liner\": str,  // Главная мысль в 10-15 словах: что это за товар и стоит ли брать\n"
