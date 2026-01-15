@@ -1123,93 +1123,143 @@
           pointer-events: none;
         }
 
-        .neural-node {
+        /* Neural network layers */
+        .nn-layer {
           position: absolute;
-          width: 8px;
-          height: 8px;
-          background: var(--accent-primary);
-          border-radius: 50%;
-          box-shadow: 0 0 20px var(--accent-glow), 0 0 40px var(--accent-glow);
-          animation: pulse-node 2s ease-in-out infinite;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          gap: 30px;
+          height: 100%;
         }
 
-        .neural-node::before {
+        .nn-layer.input { left: 8%; }
+        .nn-layer.hidden1 { left: 30%; }
+        .nn-layer.hidden2 { left: 52%; }
+        .nn-layer.output { left: 75%; }
+
+        .nn-node {
+          width: 14px;
+          height: 14px;
+          background: var(--accent-primary);
+          border-radius: 50%;
+          position: relative;
+          box-shadow: 0 0 15px var(--accent-glow);
+          transition: all 0.3s ease;
+        }
+
+        .nn-node.active {
+          background: var(--accent-secondary);
+          box-shadow: 0 0 25px var(--accent-secondary), 0 0 50px var(--accent-secondary);
+          transform: scale(1.3);
+        }
+
+        .nn-node::after {
           content: '';
           position: absolute;
           top: 50%;
           left: 50%;
-          width: 200px;
-          height: 1px;
-          background: linear-gradient(90deg, var(--accent-glow), transparent);
+          width: 30px;
+          height: 30px;
+          background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+          transform: translate(-50%, -50%);
+          border-radius: 50%;
+          opacity: 0;
+          animation: node-pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes node-pulse {
+          0%, 100% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+          50% { opacity: 0.6; transform: translate(-50%, -50%) scale(1.2); }
+        }
+
+        /* Connection lines between layers */
+        .nn-connection {
+          position: absolute;
+          height: 2px;
+          background: linear-gradient(90deg,
+            rgba(99, 102, 241, 0.1) 0%,
+            rgba(139, 92, 246, 0.3) 50%,
+            rgba(99, 102, 241, 0.1) 100%);
           transform-origin: left center;
-          animation: rotate-line 8s linear infinite;
+          opacity: 0.3;
         }
 
-        @keyframes pulse-node {
-          0%, 100% { opacity: 0.3; transform: scale(1); }
-          50% { opacity: 0.8; transform: scale(1.5); }
-        }
-
-        @keyframes rotate-line {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-
-        .neural-connection {
+        /* Signal traveling along connection */
+        .nn-signal {
           position: absolute;
-          height: 1px;
-          background: linear-gradient(90deg, transparent, var(--accent-glow), transparent);
-          animation: flow-data 3s ease-in-out infinite;
-          opacity: 0.4;
-        }
-
-        @keyframes flow-data {
-          0% { opacity: 0.1; background-position: -200% 0; }
-          50% { opacity: 0.6; }
-          100% { opacity: 0.1; background-position: 200% 0; }
-        }
-
-        .data-particle {
-          position: absolute;
-          width: 4px;
-          height: 4px;
+          width: 8px;
+          height: 8px;
           background: var(--accent-secondary);
           border-radius: 50%;
-          box-shadow: 0 0 10px var(--accent-secondary);
-          animation: float-particle 6s ease-in-out infinite;
+          box-shadow: 0 0 15px var(--accent-secondary), 0 0 30px var(--accent-secondary);
+          opacity: 0;
+          animation: signal-travel var(--duration, 1.5s) ease-in-out infinite;
+          animation-delay: var(--delay, 0s);
         }
 
-        @keyframes float-particle {
-          0%, 100% { transform: translateY(0) translateX(0); opacity: 0; }
-          10% { opacity: 0.8; }
-          50% { transform: translateY(-50px) translateX(30px); opacity: 0.6; }
-          90% { opacity: 0.8; }
+        @keyframes signal-travel {
+          0% { left: 0%; opacity: 0; transform: scale(0.5); }
+          10% { opacity: 1; transform: scale(1); }
+          90% { opacity: 1; transform: scale(1); }
+          100% { left: 100%; opacity: 0; transform: scale(0.5); }
         }
 
-        /* Loading fun messages */
+        /* Background ambient particles */
+        .nn-particle {
+          position: absolute;
+          width: 3px;
+          height: 3px;
+          background: var(--accent-primary);
+          border-radius: 50%;
+          opacity: 0.2;
+          animation: particle-float 8s ease-in-out infinite;
+        }
+
+        @keyframes particle-float {
+          0%, 100% { transform: translateY(0) translateX(0); opacity: 0.1; }
+          25% { transform: translateY(-20px) translateX(10px); opacity: 0.3; }
+          50% { transform: translateY(-10px) translateX(-5px); opacity: 0.2; }
+          75% { transform: translateY(-30px) translateX(15px); opacity: 0.3; }
+        }
+
+        /* Loading fun messages - smooth fade transition */
         .loading-fun-message {
           margin-top: 16px;
           font-size: 14px;
           color: var(--text-secondary);
           font-style: italic;
-          min-height: 20px;
-          animation: fade-message 0.5s ease-out;
+          min-height: 24px;
+          position: relative;
         }
 
-        @keyframes fade-message {
-          from { opacity: 0; transform: translateY(5px); }
-          to { opacity: 1; transform: translateY(0); }
+        .loading-fun-message .message-text {
+          position: absolute;
+          left: 0;
+          right: 0;
+          text-align: center;
+          transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+        }
+
+        .loading-fun-message .message-text.entering {
+          opacity: 1;
+          transform: translateY(0);
+        }
+
+        .loading-fun-message .message-text.exiting {
+          opacity: 0;
+          transform: translateY(-10px);
         }
 
         .loading-emoji {
           font-size: 32px;
           margin-bottom: 8px;
-          animation: bounce-emoji 1s ease-in-out infinite;
+          transition: all 0.4s ease-in-out;
         }
 
-        @keyframes bounce-emoji {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-5px); }
+        .loading-emoji.changing {
+          opacity: 0;
+          transform: scale(0.8) translateY(5px);
         }
 
         @keyframes fly-left {
@@ -1480,44 +1530,101 @@
 
         const LoadingOverlay = ({ progress, message, sessionId, status }) => {
           const [flyingReviews, setFlyingReviews] = useState([]);
-          const [funMessage, setFunMessage] = useState({ emoji: '🚀', text: 'Запускаем анализ...' });
-          const [nodes, setNodes] = useState([]);
-          const [particles, setParticles] = useState([]);
+          const [currentMessage, setCurrentMessage] = useState({ emoji: '🚀', text: 'Запускаем анализ...' });
+          const [nextMessage, setNextMessage] = useState(null);
+          const [isTransitioning, setIsTransitioning] = useState(false);
+          const [activeNodes, setActiveNodes] = useState(new Set());
+          const [connections, setConnections] = useState([]);
           const lastSeenRef = useRef(0);
           const keyRef = useRef(0);
 
-          // Generate neural network nodes
-          useEffect(() => {
-            const newNodes = Array.from({ length: 12 }, (_, i) => ({
-              id: i,
-              x: Math.random() * 100,
-              y: Math.random() * 100,
-              delay: Math.random() * 2,
-              size: 6 + Math.random() * 6,
-            }));
-            setNodes(newNodes);
+          // Neural network structure: 4 layers
+          const layers = [
+            { id: 'input', nodes: 5, x: 8 },
+            { id: 'hidden1', nodes: 6, x: 30 },
+            { id: 'hidden2', nodes: 6, x: 52 },
+            { id: 'output', nodes: 4, x: 75 },
+          ];
 
-            const newParticles = Array.from({ length: 20 }, (_, i) => ({
-              id: i,
-              x: Math.random() * 100,
-              y: Math.random() * 100,
-              delay: Math.random() * 6,
-              duration: 4 + Math.random() * 4,
-            }));
-            setParticles(newParticles);
+          // Generate connections between layers
+          useEffect(() => {
+            const conns = [];
+            let connId = 0;
+
+            for (let l = 0; l < layers.length - 1; l++) {
+              const fromLayer = layers[l];
+              const toLayer = layers[l + 1];
+
+              for (let i = 0; i < fromLayer.nodes; i++) {
+                // Connect to 2-3 random nodes in next layer
+                const targets = [];
+                const numConnections = 2 + Math.floor(Math.random() * 2);
+                while (targets.length < numConnections) {
+                  const t = Math.floor(Math.random() * toLayer.nodes);
+                  if (!targets.includes(t)) targets.push(t);
+                }
+
+                targets.forEach(j => {
+                  conns.push({
+                    id: connId++,
+                    fromLayer: l,
+                    fromNode: i,
+                    toLayer: l + 1,
+                    toNode: j,
+                    delay: Math.random() * 4,
+                    duration: 1.5 + Math.random() * 1.5,
+                  });
+                });
+              }
+            }
+            setConnections(conns);
           }, []);
 
-          // Rotate fun messages
+          // Animate active nodes (signal propagation)
+          useEffect(() => {
+            const animateSignal = () => {
+              // Activate random nodes in sequence through layers
+              const newActive = new Set();
+
+              layers.forEach((layer, layerIdx) => {
+                const numActive = 1 + Math.floor(Math.random() * 2);
+                for (let i = 0; i < numActive; i++) {
+                  const nodeIdx = Math.floor(Math.random() * layer.nodes);
+                  newActive.add(`${layerIdx}-${nodeIdx}`);
+                }
+              });
+
+              setActiveNodes(newActive);
+            };
+
+            animateSignal();
+            const interval = setInterval(animateSignal, 800);
+            return () => clearInterval(interval);
+          }, []);
+
+          // Smooth message transitions
           useEffect(() => {
             const messages = LOADING_MESSAGES[status] || LOADING_MESSAGES.fetching;
-            const interval = setInterval(() => {
-              const randomMsg = messages[Math.floor(Math.random() * messages.length)];
-              setFunMessage(randomMsg);
-            }, 3000);
+
+            const changeMessage = () => {
+              const newMsg = messages[Math.floor(Math.random() * messages.length)];
+
+              // Start transition
+              setIsTransitioning(true);
+              setNextMessage(newMsg);
+
+              // After fade out, switch messages
+              setTimeout(() => {
+                setCurrentMessage(newMsg);
+                setNextMessage(null);
+                setIsTransitioning(false);
+              }, 500);
+            };
 
             // Set initial message
-            setFunMessage(messages[Math.floor(Math.random() * messages.length)]);
+            setCurrentMessage(messages[Math.floor(Math.random() * messages.length)]);
 
+            const interval = setInterval(changeMessage, 3500);
             return () => clearInterval(interval);
           }, [status]);
 
@@ -1553,32 +1660,88 @@
             return () => clearInterval(interval);
           }, [sessionId, progress]);
 
+          // Calculate node positions
+          const getNodePosition = (layerIdx, nodeIdx, totalNodes) => {
+            const layer = layers[layerIdx];
+            const spacing = 60;
+            const startY = 50 - ((totalNodes - 1) * spacing) / 2;
+            return {
+              x: layer.x,
+              y: startY + nodeIdx * spacing,
+            };
+          };
+
+          // Calculate connection line
+          const getConnectionStyle = (conn) => {
+            const from = getNodePosition(conn.fromLayer, conn.fromNode, layers[conn.fromLayer].nodes);
+            const to = getNodePosition(conn.toLayer, conn.toNode, layers[conn.toLayer].nodes);
+
+            const dx = to.x - from.x;
+            const dy = to.y - from.y;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+            return {
+              left: `${from.x}%`,
+              top: `${from.y}%`,
+              width: `${length}%`,
+              transform: `rotate(${angle}deg)`,
+            };
+          };
+
+          // Background particles
+          const particles = Array.from({ length: 25 }, (_, i) => ({
+            id: i,
+            x: Math.random() * 100,
+            y: Math.random() * 100,
+            delay: Math.random() * 8,
+          }));
+
           return (
             <div className="loading-overlay">
-              {/* Neural network background */}
+              {/* Neural network with layers */}
               <div className="neural-network">
-                {nodes.map(node => (
+                {/* Connection lines */}
+                {connections.map(conn => (
                   <div
-                    key={node.id}
-                    className="neural-node"
-                    style={{
-                      left: `${node.x}%`,
-                      top: `${node.y}%`,
-                      width: `${node.size}px`,
-                      height: `${node.size}px`,
-                      animationDelay: `${node.delay}s`,
-                    }}
-                  />
+                    key={`conn-${conn.id}`}
+                    className="nn-connection"
+                    style={getConnectionStyle(conn)}
+                  >
+                    <div
+                      className="nn-signal"
+                      style={{
+                        '--delay': `${conn.delay}s`,
+                        '--duration': `${conn.duration}s`,
+                      }}
+                    />
+                  </div>
                 ))}
+
+                {/* Nodes in layers */}
+                {layers.map((layer, layerIdx) => (
+                  <div key={layer.id} className={`nn-layer ${layer.id}`}>
+                    {Array.from({ length: layer.nodes }, (_, nodeIdx) => (
+                      <div
+                        key={`${layerIdx}-${nodeIdx}`}
+                        className={`nn-node ${activeNodes.has(`${layerIdx}-${nodeIdx}`) ? 'active' : ''}`}
+                        style={{
+                          animationDelay: `${(layerIdx * 0.3 + nodeIdx * 0.1)}s`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                ))}
+
+                {/* Background particles */}
                 {particles.map(p => (
                   <div
-                    key={`p-${p.id}`}
-                    className="data-particle"
+                    key={`particle-${p.id}`}
+                    className="nn-particle"
                     style={{
                       left: `${p.x}%`,
                       top: `${p.y}%`,
                       animationDelay: `${p.delay}s`,
-                      animationDuration: `${p.duration}s`,
                     }}
                   />
                 ))}
@@ -1612,10 +1775,16 @@
 
               {/* Center content */}
               <div className="loading-content">
-                <div className="loading-emoji">{funMessage.emoji}</div>
+                <div className={`loading-emoji ${isTransitioning ? 'changing' : ''}`}>
+                  {isTransitioning && nextMessage ? nextMessage.emoji : currentMessage.emoji}
+                </div>
                 <div className="loading-spinner" />
                 <div className="loading-text">{message || 'Анализируем'}</div>
-                <div className="loading-fun-message" key={funMessage.text}>{funMessage.text}</div>
+                <div className="loading-fun-message">
+                  <span className={`message-text ${isTransitioning ? 'exiting' : 'entering'}`}>
+                    {currentMessage.text}
+                  </span>
+                </div>
                 <div className="loading-progress">
                   <div className="progress-bar">
                     <div className="progress-fill" style={{ width: `${progress}%` }} />
