@@ -972,6 +972,7 @@
         
         /* ===== LOADING OVERLAY ===== */
         .loading-overlay {
+          isolation: isolate;
           position: fixed;
           top: 0; left: 0; right: 0; bottom: 0;
           background: rgba(10, 10, 15, 0.97);
@@ -985,6 +986,8 @@
         }
 
         .loading-content {
+          position: relative;
+          z-index: 2;
           text-align: center;
           width: 100%;
           max-width: 320px;
@@ -1057,20 +1060,28 @@
           top: 0; left: 0; right: 0; bottom: 0;
           overflow: hidden;
           pointer-events: none;
+          z-index: 0;
         }
 
+        /* NEW: smoother + no "pop out" */
         .flying-review {
           position: absolute;
           max-width: 280px;
           padding: 12px 16px;
-          background: rgba(22, 22, 31, 0.7);
-          border: 1px solid rgba(255, 255, 255, 0.08);
+          background: rgba(22, 22, 31, 0.34);
+          border: 1px solid rgba(255, 255, 255, 0.06);
           border-radius: 12px;
-          backdrop-filter: blur(8px);
-          -webkit-backdrop-filter: blur(8px);
-          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-          transform-origin: center;
-          will-change: transform, opacity;
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+
+          will-change: transform, opacity, filter;
+          transform: translate3d(0,0,0);
+          opacity: 0;
+
+          left: var(--x);
+          top: var(--y);
+          animation: fly-down var(--dur) cubic-bezier(.22, 1, .36, 1) var(--delay) forwards;
         }
 
         .flying-review-header {
@@ -1115,89 +1126,6 @@
           color: var(--text-muted);
         }
 
-        /* ===== NEURAL NETWORK ANIMATION ===== */
-        .neural-network {
-          position: absolute;
-          top: 0; left: 0; right: 0; bottom: 0;
-          overflow: hidden;
-          pointer-events: none;
-        }
-
-        /* Neural network layers */
-        .nn-layer {
-          position: absolute;
-          display: flex;
-          flex-direction: column;
-          justify-content: center;
-          gap: 30px;
-          height: 100%;
-        }
-
-        .nn-layer.input { left: 8%; }
-        .nn-layer.hidden1 { left: 30%; }
-        .nn-layer.hidden2 { left: 52%; }
-        .nn-layer.output { left: 75%; }
-
-        .nn-node {
-          width: 6px;
-          height: 6px;
-          background: var(--accent-primary);
-          border-radius: 50%;
-          position: relative;
-          box-shadow: 0 0 8px var(--accent-glow);
-          opacity: 0.4;
-        }
-
-        /* Connection lines between layers */
-        .nn-connection {
-          position: absolute;
-          height: 2px;
-          background: linear-gradient(90deg,
-            rgba(99, 102, 241, 0.1) 0%,
-            rgba(139, 92, 246, 0.3) 50%,
-            rgba(99, 102, 241, 0.1) 100%);
-          transform-origin: left center;
-          opacity: 0.3;
-        }
-
-        /* Signal traveling along connection */
-        .nn-signal {
-          position: absolute;
-          width: 8px;
-          height: 8px;
-          background: var(--accent-secondary);
-          border-radius: 50%;
-          box-shadow: 0 0 15px var(--accent-secondary), 0 0 30px var(--accent-secondary);
-          opacity: 0;
-          animation: signal-travel var(--duration, 1.5s) ease-in-out infinite;
-          animation-delay: var(--delay, 0s);
-        }
-
-        @keyframes signal-travel {
-          0% { left: 0%; opacity: 0; transform: scale(0.5); }
-          10% { opacity: 1; transform: scale(1); }
-          90% { opacity: 1; transform: scale(1); }
-          100% { left: 100%; opacity: 0; transform: scale(0.5); }
-        }
-
-        /* Background ambient particles */
-        .nn-particle {
-          position: absolute;
-          width: 3px;
-          height: 3px;
-          background: var(--accent-primary);
-          border-radius: 50%;
-          opacity: 0.2;
-          animation: particle-float 8s ease-in-out infinite;
-        }
-
-        @keyframes particle-float {
-          0%, 100% { transform: translateY(0) translateX(0); opacity: 0.1; }
-          25% { transform: translateY(-20px) translateX(10px); opacity: 0.3; }
-          50% { transform: translateY(-10px) translateX(-5px); opacity: 0.2; }
-          75% { transform: translateY(-30px) translateX(15px); opacity: 0.3; }
-        }
-
         /* Loading fun messages - smooth fade transition */
         .loading-fun-message {
           margin-top: 16px;
@@ -1237,18 +1165,35 @@
           transform: scale(0.8) translateY(5px);
         }
 
-        @keyframes fly-left {
-          0% { opacity: 0; transform: translateX(40px) scale(0.9); }
-          15% { opacity: 0.6; transform: translateX(0) scale(1); }
-          85% { opacity: 0.6; transform: translateX(-80px) scale(1); }
-          100% { opacity: 0; transform: translateX(-120px) scale(0.9); }
+        /* NEW: smooth fly with fade-in/out + drift */
+        @keyframes fly-down {
+          0% {
+            opacity: 0;
+            filter: blur(3px);
+            transform: translate3d(0, -22px, 0) scale(0.985) rotate(var(--rot));
+          }
+          14% {
+            opacity: 0.32;
+            filter: blur(0px);
+            transform: translate3d(calc(var(--drift) * 0.25), 0px, 0) scale(1) rotate(var(--rot));
+          }
+          86% {
+            opacity: 0.32;
+            filter: blur(0px);
+            transform: translate3d(var(--drift), calc(100vh + 120px), 0) scale(1) rotate(var(--rot));
+          }
+          100% {
+            opacity: 0;
+            filter: blur(3px);
+            transform: translate3d(var(--drift), calc(100vh + 180px), 0) scale(0.985) rotate(var(--rot));
+          }
         }
 
-        @keyframes fly-right {
-          0% { opacity: 0; transform: translateX(-40px) scale(0.9); }
-          15% { opacity: 0.6; transform: translateX(0) scale(1); }
-          85% { opacity: 0.6; transform: translateX(80px) scale(1); }
-          100% { opacity: 0; transform: translateX(120px) scale(0.9); }
+        @media (prefers-reduced-motion: reduce) {
+          .flying-review {
+            animation: none;
+            opacity: 1;
+          }
         }
 
         /* ===== DESKTOP STYLES ===== */
@@ -1473,109 +1418,47 @@
         // Fun loading messages by stage
         const LOADING_MESSAGES = {
           fetching: [
-            { emoji: '🔍', text: 'Ищем отзывы на просторах интернета...' },
-            { emoji: '📡', text: 'Подключаемся к серверам магазина...' },
-            { emoji: '🕵️', text: 'Собираем мнения покупателей...' },
-            { emoji: '📦', text: 'Распаковываем данные о товаре...' },
-            { emoji: '🌐', text: 'Сканируем страницы с отзывами...' },
+            { emoji: '🔎', text: 'Собираем отзывы…' },
+            { emoji: '🌐', text: 'Проверяем источники…' },
+            { emoji: '📥', text: 'Загружаем данные по товару…' },
+            { emoji: '🧾', text: 'Собираем тексты и оценки…' },
+            { emoji: '🧹', text: 'Чистим дубли и мусор…' },
           ],
           scoring: [
-            { emoji: '🧠', text: 'Нейросеть изучает каждый отзыв...' },
-            { emoji: '⚖️', text: 'Взвешиваем честность мнений...' },
-            { emoji: '🔬', text: 'Анализируем тональность текста...' },
-            { emoji: '🎯', text: 'Выявляем накрученные отзывы...' },
-            { emoji: '💡', text: 'ИИ думает над оценками...' },
-            { emoji: '🤖', text: 'Модели обрабатывают текст...' },
+            { emoji: '🧠', text: 'Оцениваем тональность и рейтинг…' },
+            { emoji: '🧪', text: 'Ищем признаки накрутки…' },
+            { emoji: '⚖️', text: 'Считаем доверие к отзывам…' },
+            { emoji: '🔍', text: 'Проверяем согласованность оценок…' },
+            { emoji: '📊', text: 'Собираем метрики качества…' },
           ],
           building_rag: [
-            { emoji: '🏗️', text: 'Строим базу знаний о товаре...' },
-            { emoji: '🔗', text: 'Связываем факты воедино...' },
-            { emoji: '📚', text: 'Индексируем полезную информацию...' },
-            { emoji: '🧩', text: 'Собираем пазл из отзывов...' },
-            { emoji: '🗂️', text: 'Организуем данные для поиска...' },
+            { emoji: '🧭', text: 'Готовим поиск по отзывам…' },
+            { emoji: '🧱', text: 'Строим индекс для быстрых ответов…' },
+            { emoji: '🗂️', text: 'Собираем базу контекста…' },
+            { emoji: '🔗', text: 'Связываем отзывы и характеристики…' },
+            { emoji: '⚡', text: 'Оптимизируем выдачу…' },
           ],
           summarizing: [
-            { emoji: '✍️', text: 'Пишем честную сводку...' },
-            { emoji: '🎨', text: 'Оформляем результаты анализа...' },
-            { emoji: '📝', text: 'Формулируем выводы...' },
-            { emoji: '🌟', text: 'Готовим вердикт для вас...' },
-            { emoji: '🏆', text: 'Финальные штрихи...' },
+            { emoji: '🧾', text: 'Собираем краткую сводку…' },
+            { emoji: '🧩', text: 'Выделяем ключевые плюсы и минусы…' },
+            { emoji: '📌', text: 'Фиксируем важные нюансы…' },
+            { emoji: '✅', text: 'Готовим итоговый вывод…' },
+            { emoji: '🏁', text: 'Почти готово…' },
           ],
         };
+
 
         const LoadingOverlay = ({ progress, message, sessionId, status }) => {
           const [flyingReviews, setFlyingReviews] = useState([]);
           const [currentMessage, setCurrentMessage] = useState({ emoji: '🚀', text: 'Запускаем анализ...' });
           const [nextMessage, setNextMessage] = useState(null);
           const [isTransitioning, setIsTransitioning] = useState(false);
-          const [activeNodes, setActiveNodes] = useState(new Set());
-          const [connections, setConnections] = useState([]);
+
           const lastSeenRef = useRef(0);
           const keyRef = useRef(0);
+          const isFetchingRef = useRef(false);
 
-          // Neural network structure: 4 layers
-          const layers = [
-            { id: 'input', nodes: 5, x: 8 },
-            { id: 'hidden1', nodes: 6, x: 30 },
-            { id: 'hidden2', nodes: 6, x: 52 },
-            { id: 'output', nodes: 4, x: 75 },
-          ];
-
-          // Generate connections between layers
-          useEffect(() => {
-            const conns = [];
-            let connId = 0;
-
-            for (let l = 0; l < layers.length - 1; l++) {
-              const fromLayer = layers[l];
-              const toLayer = layers[l + 1];
-
-              for (let i = 0; i < fromLayer.nodes; i++) {
-                // Connect to 2-3 random nodes in next layer
-                const targets = [];
-                const numConnections = 2 + Math.floor(Math.random() * 2);
-                while (targets.length < numConnections) {
-                  const t = Math.floor(Math.random() * toLayer.nodes);
-                  if (!targets.includes(t)) targets.push(t);
-                }
-
-                targets.forEach(j => {
-                  conns.push({
-                    id: connId++,
-                    fromLayer: l,
-                    fromNode: i,
-                    toLayer: l + 1,
-                    toNode: j,
-                    delay: Math.random() * 4,
-                    duration: 1.5 + Math.random() * 1.5,
-                  });
-                });
-              }
-            }
-            setConnections(conns);
-          }, []);
-
-          // Animate active nodes (signal propagation)
-          useEffect(() => {
-            const animateSignal = () => {
-              // Activate random nodes in sequence through layers
-              const newActive = new Set();
-
-              layers.forEach((layer, layerIdx) => {
-                const numActive = 1 + Math.floor(Math.random() * 2);
-                for (let i = 0; i < numActive; i++) {
-                  const nodeIdx = Math.floor(Math.random() * layer.nodes);
-                  newActive.add(`${layerIdx}-${nodeIdx}`);
-                }
-              });
-
-              setActiveNodes(newActive);
-            };
-
-            animateSignal();
-            const interval = setInterval(animateSignal, 800);
-            return () => clearInterval(interval);
-          }, []);
+          const MAX_FLYING = 14;
 
           // Smooth message transitions
           useEffect(() => {
@@ -1603,131 +1486,78 @@
             return () => clearInterval(interval);
           }, [status]);
 
-          // Fetch reviews for animation
+          // Cleanup expired flying reviews (important if animations don't fire end events)
+          useEffect(() => {
+            const t = setInterval(() => {
+              const now = Date.now();
+              setFlyingReviews(prev => prev.filter(x => (x.expiresAt || 0) > now));
+            }, 1200);
+            return () => clearInterval(t);
+          }, []);
+
+          // Fetch reviews for animation (NO "slice(-16)" pop-out)
           useEffect(() => {
             if (!sessionId || progress < 30) return;
 
+            let alive = true;
+
             const fetchReviews = async () => {
+              if (isFetchingRef.current) return;
+              isFetchingRef.current = true;
+
               try {
                 const res = await fetch(`${API_BASE}/reviews-stream/${sessionId}?last_seen=${lastSeenRef.current}`);
                 if (!res.ok) return;
                 const data = await res.json();
+                if (!alive) return;
 
                 if (data.reviews && data.reviews.length > 0) {
-                  const newFlying = data.reviews.map((r, i) => {
-                    // Позиции только по краям, не в центре (центр 35-65%)
-                    const isLeft = Math.random() > 0.5;
-                    const x = isLeft ? Math.random() * 25 + 5 : Math.random() * 25 + 70;
-                    const y = Math.random() * 60 + 20;
+                  const now = Date.now();
+
+                  const picked = [...data.reviews].sort(() => Math.random() - 0.5).slice(0, 2);
+
+                  const newFlying = picked.map((r, i) => {
+                    const x = Math.random() * 88 + 6;         // 6..94%
+                    const y = Math.random() * 12 - 14;        // above the screen
+                    const duration = 28 + Math.random() * 16; // 28..44s (slower)
+                    const delay = i * 1.15;                   // stagger (more spaced)
+                    const drift = (Math.random() * 80 - 40);  // -40..40px
+                    const rot = (Math.random() * 4 - 2);       // -2..2deg
+
                     return {
                       ...r,
                       key: `fr-${keyRef.current++}`,
-                      x,
-                      y,
-                      duration: 12 + Math.random() * 5,
-                      delay: i * 0.5,
-                      direction: isLeft ? 'left' : 'right',
+                      x, y,
+                      duration,
+                      delay,
+                      drift,
+                      rot,
+                      expiresAt: now + (duration + delay) * 1000 + 600,
                     };
                   });
 
-                  setFlyingReviews(prev => [...prev, ...newFlying].slice(-10));
+                  setFlyingReviews(prev => {
+                    const cleaned = prev.filter(item => (item.expiresAt || 0) > Date.now());
+                    const merged = [...cleaned, ...newFlying];
+                    return merged.length > MAX_FLYING ? merged.slice(merged.length - MAX_FLYING) : merged;
+                  });
+
                   lastSeenRef.current = data.next_index;
                 }
-              } catch (e) {}
+              } catch (e) {
+                // ignore
+              } finally {
+                isFetchingRef.current = false;
+              }
             };
 
             fetchReviews();
-            const interval = setInterval(fetchReviews, 2500);
-            return () => clearInterval(interval);
+            const interval = setInterval(fetchReviews, 4500);
+            return () => { alive = false; clearInterval(interval); };
           }, [sessionId, progress]);
-
-          // Calculate node positions
-          const getNodePosition = (layerIdx, nodeIdx, totalNodes) => {
-            const layer = layers[layerIdx];
-            const spacing = 60;
-            const startY = 50 - ((totalNodes - 1) * spacing) / 2;
-            return {
-              x: layer.x,
-              y: startY + nodeIdx * spacing,
-            };
-          };
-
-          // Calculate connection line
-          const getConnectionStyle = (conn) => {
-            const from = getNodePosition(conn.fromLayer, conn.fromNode, layers[conn.fromLayer].nodes);
-            const to = getNodePosition(conn.toLayer, conn.toNode, layers[conn.toLayer].nodes);
-
-            const dx = to.x - from.x;
-            const dy = to.y - from.y;
-            const length = Math.sqrt(dx * dx + dy * dy);
-            const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-
-            return {
-              left: `${from.x}%`,
-              top: `${from.y}%`,
-              width: `${length}%`,
-              transform: `rotate(${angle}deg)`,
-            };
-          };
-
-          // Background particles
-          const particles = Array.from({ length: 25 }, (_, i) => ({
-            id: i,
-            x: Math.random() * 100,
-            y: Math.random() * 100,
-            delay: Math.random() * 8,
-          }));
 
           return (
             <div className="loading-overlay">
-              {/* Neural network with layers */}
-              <div className="neural-network">
-                {/* Connection lines */}
-                {connections.map(conn => (
-                  <div
-                    key={`conn-${conn.id}`}
-                    className="nn-connection"
-                    style={getConnectionStyle(conn)}
-                  >
-                    <div
-                      className="nn-signal"
-                      style={{
-                        '--delay': `${conn.delay}s`,
-                        '--duration': `${conn.duration}s`,
-                      }}
-                    />
-                  </div>
-                ))}
-
-                {/* Nodes in layers */}
-                {layers.map((layer, layerIdx) => (
-                  <div key={layer.id} className={`nn-layer ${layer.id}`}>
-                    {Array.from({ length: layer.nodes }, (_, nodeIdx) => (
-                      <div
-                        key={`${layerIdx}-${nodeIdx}`}
-                        className={`nn-node ${activeNodes.has(`${layerIdx}-${nodeIdx}`) ? 'active' : ''}`}
-                        style={{
-                          animationDelay: `${(layerIdx * 0.3 + nodeIdx * 0.1)}s`,
-                        }}
-                      />
-                    ))}
-                  </div>
-                ))}
-
-                {/* Background particles */}
-                {particles.map(p => (
-                  <div
-                    key={`particle-${p.id}`}
-                    className="nn-particle"
-                    style={{
-                      left: `${p.x}%`,
-                      top: `${p.y}%`,
-                      animationDelay: `${p.delay}s`,
-                    }}
-                  />
-                ))}
-              </div>
-
               {/* Flying reviews */}
               <div className="flying-reviews-container">
                 {flyingReviews.map(review => (
@@ -1735,10 +1565,15 @@
                     key={review.key}
                     className="flying-review"
                     style={{
-                      left: `${review.x}%`,
-                      top: `${review.y}%`,
-                      animation: `fly-${review.direction} ${review.duration}s linear ${review.delay}s forwards`,
-                      opacity: 0,
+                      '--x': `${review.x}%`,
+                      '--y': `${review.y}%`,
+                      '--dur': `${review.duration}s`,
+                      '--delay': `${review.delay}s`,
+                      '--drift': `${review.drift}px`,
+                      '--rot': `${review.rot}deg`,
+                    }}
+                    onAnimationEnd={() => {
+                      setFlyingReviews(prev => prev.filter(x => x.key !== review.key));
                     }}
                   >
                     <div className="flying-review-header">
@@ -1801,6 +1636,23 @@
           const [error, setError] = useState(null);
           const chatEndRef = useRef(null);
 
+          const extractUrlFromText = (value) => {
+            const text = (value || '').trim();
+            if (!text) return '';
+            const directMatch = text.match(/https?:\/\/[^\s]+/i);
+            if (directMatch) return directMatch[0].replace(/[),.;]+$/g, '');
+            const bareMatch = text.match(/\b(?:www\.)?(wildberries\.ru|onliner\.by)\/[^\s]+/i);
+            if (bareMatch) return `https://${bareMatch[0].replace(/^www\./i, '')}`;
+            return text;
+          };
+
+          const handleUrlPaste = (event) => {
+            const pastedText = event.clipboardData?.getData('text') || '';
+            if (!pastedText) return;
+            event.preventDefault();
+            setUrl(extractUrlFromText(pastedText));
+          };
+
           useEffect(() => {
             chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
           }, [chatMessages]);
@@ -1837,14 +1689,16 @@
           }, [isAnalyzing, sessionId]);
 
           const handleAnalyze = async () => {
-            if (!url.trim()) return;
+            const normalizedUrl = extractUrlFromText(url);
+            if (!normalizedUrl) return;
+            if (normalizedUrl !== url) setUrl(normalizedUrl);
             setError(null);
             setIsAnalyzing(true);
             setHasData(false);
             setAnalysisStatus({ progress: 0, message: 'Запуск...' });
             
             try {
-              const result = await api.analyze(url);
+              const result = await api.analyze(normalizedUrl);
               setSessionId(result.session_id);
               
               if (result.status === 'ready') {
@@ -1934,13 +1788,14 @@
                         placeholder="wildberries.ru/catalog/..."
                         value={url}
                         onChange={(e) => setUrl(e.target.value)}
+                        onPaste={handleUrlPaste}
                         onKeyPress={(e) => e.key === 'Enter' && handleAnalyze()}
                       />
                       <button className="analyze-btn" onClick={handleAnalyze} disabled={isAnalyzing || !url.trim()}>
                         {isAnalyzing ? <><div className="spinner" /> Анализ...</> : <>✨ Анализ</>}
                       </button>
                     </div>
-                    {error && <div className="error-banner">⚠️ {error}</div>}
+                    {error && <div className="error-banner">⚠️ Ошибка: проверьте ссылку на товар</div>}
                   </div>
                 </section>
 
