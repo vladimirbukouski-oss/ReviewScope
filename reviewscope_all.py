@@ -1787,15 +1787,9 @@ def rag_answer(question: str, ctx: List[Dict[str, Any]], llm_cfg: LLMProviderCon
     )
 
     user = (
-        f"Вопрос: {question}
-
-"
-        f"Товар (метаданные JSON):
-{json.dumps(product_meta, ensure_ascii=False)}
-
-"
-        f"Отзывы (JSON):
-{json.dumps(ctx, ensure_ascii=False)}"
+        f"Вопрос: {question}\n\n"
+        f"Товар (метаданные JSON):\n{json.dumps(product_meta, ensure_ascii=False)}\n\n"
+        f"Отзывы (JSON):\n{json.dumps(ctx, ensure_ascii=False)}"
     )
 
     return llm_generate(
