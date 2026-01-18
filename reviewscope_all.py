@@ -1564,7 +1564,7 @@ def embed_texts(texts: List[str], cfg: EmbeddingProviderConfig) -> np.ndarray:
 @dataclass
 class LLMProviderConfig:
     provider: str = "openai"  # openai | groq
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4.1-nano"
     timeout_s: int = 90
     max_retries: int = 6
     temperature: float = 0.2
@@ -2169,7 +2169,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--emb_model", default="text-embedding-3-small")
     run.add_argument("--emb_batch", type=int, default=96)
     run.add_argument("--llm_provider", default="openai", choices=["openai", "groq"])
-    run.add_argument("--llm_model", default="gpt-4o-mini")
+    run.add_argument("--llm_model", default="gpt-4.1-nano")
     run.add_argument("--temp", type=float, default=0.2)
     run.add_argument("--make_summary", action="store_true", help="Сделать stage4_summary.json")
     run.add_argument("--summary_out", default="", help="Куда сохранить summary (по умолчанию out_dir/stage4_summary.json)")
@@ -2201,7 +2201,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--emb_model", default="text-embedding-3-small")
     ask.add_argument("--emb_batch", type=int, default=96)
     ask.add_argument("--llm_provider", default="openai", choices=["openai", "groq"])
-    ask.add_argument("--llm_model", default="gpt-4o-mini")
+    ask.add_argument("--llm_model", default="gpt-4.1-nano")
     ask.add_argument("--temp", type=float, default=0.2)
     ask.add_argument("--top_k", type=int, default=30)
     ask.add_argument("--rerank_k", type=int, default=12)
@@ -2215,7 +2215,7 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--out", default="stage4_summary.json")
     sm.add_argument("--max_evidence", type=int, default=90)
     sm.add_argument("--llm_provider", default="openai", choices=["openai", "groq"])
-    sm.add_argument("--llm_model", default="gpt-4o-mini")
+    sm.add_argument("--llm_model", default="gpt-4.1-nano")
     sm.add_argument("--temp", type=float, default=0.2)
     sm.set_defaults(func=cmd_summarize)
 
