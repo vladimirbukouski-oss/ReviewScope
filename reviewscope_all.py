@@ -1754,39 +1754,79 @@ def format_context(items: List[Tuple[float, Dict[str, Any]]], max_chars_each: in
     return ctx
 
 
-def rag_answer(question: str, ctx: List[Dict[str, Any]], llm_cfg: LLMProviderConfig) -> str:
+def rag_answer(question: str, ctx: List[Dict[str, Any]], llm_cfg: LLMProviderConfig,
+               product_meta: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Answer user question using BOTH:
+      1) product_meta (name/brand/description/category/optional specs) — factual source for характеристики
+      2) ctx reviews — source for опыт использования/качество/нюансы
+    Evidence cards in UI should still be reviews only.
+    """
+    product_meta = product_meta or {}
+
     system = (
-        "Ты эксперт по анализу отзывов. Твоя задача — дать чёткий, лаконичный ответ на вопрос пользователя, "
-        "опираясь ТОЛЬКО на предоставленные отзывы.\n"
-        "\n"
-        "ФОРМАТ ОТВЕТА:\n"
-        "Начинай сразу с сути, без заголовков и нумерации.\n"
-        "\n"
-        "Структура (БЕЗ MARKDOWN):\n"
-        "• Первый абзац (2-4 предложения): краткий ответ с ключевыми фактами\n"
-        "• Детали через абзацы:\n"
-        "  - Что хвалят (если есть)\n"
-        "  - Что критикуют (если есть)\n"
-        "  - Частота упоминаний ('большинство' / 'несколько человек' / 'единичные случаи')\n"
-        "• Последний абзац: практический вывод для покупателя\n"
-        "\n"
-        "ПРАВИЛА:\n"
-        "✓ Пиши простым языком, без звёздочек, заголовков, маркеров\n"
-        "✓ Используй абзацы для разделения мыслей\n"
-        "✓ Приводи конкретные цитаты в кавычках, но БЕЗ упоминания ID\n"
-        "✓ Указывай количество: 'почти все', '7 из 10', 'несколько', 'один покупатель'\n"
-        "✓ Будь объективен: покажи и плюсы, и минусы\n"
-        "✓ Если противоречия — так и скажи: 'мнения разделились'\n"
-        "\n"
-        "✗ НЕ выдумывай факты\n"
-        "✗ НЕ используй markdown (**, ##, -)\n"
-        "✗ НЕ пиши 'Краткий вывод:', 'Детальный анализ:' и т.п.\n"
-        "✗ НЕ упоминай ID, trust score, технические детали\n"
-        "\n"
-        "Если в отзывах нет ответа — честно скажи об этом.\n"
+        "Ты помощник по товару. Твоя задача — отвечать на вопросы пользователя о САМОМ ТОВАРЕ и о том, "
+        "что пишут покупатели.
+"
+        "
+"
+        "У тебя есть 2 источника:
+"
+        "1) Карточка товара (метаданные): название, бренд, описание, категория и возможные характеристики.
+"
+        "2) Отзывы покупателей.
+"
+        "
+"
+        "КАК ОТВЕЧАТЬ:
+"
+        "- Если вопрос про характеристики/спеки (например: память, шина, размер, материал, совместимость, комплектация) "
+        "— сначала ищи ответ в метаданных товара.
+"
+        "- Если в метаданных этого НЕТ, но в отзывах упоминают — честно скажи, что в описании не указано, "
+        "и приведи, что встречается в отзывах (с оговоркой, что это опыт покупателей).
+"
+        "- Если нет ни в описании, ни в отзывах — скажи, что данных нет.
+"
+        "- Не выдумывай характеристики. Не додумывай 'по типу должно быть'.
+"
+        "
+"
+        "ФОРМАТ ОТВЕТА (БЕЗ MARKDOWN):
+"
+        "Пиши коротко и по делу, абзацами.
+"
+        "Можно упоминать источник словами: 'По описанию товара…', 'По отзывам…'.
+"
+        "
+"
+        "ПРАВИЛА:
+"
+        "✓ Когда опираешься на отзывы — используй слова про частоту: 'часто', 'иногда', 'редко', 'мнения разделились'.
+"
+        "✓ Если есть противоречия между описанием и отзывами — покажи обе стороны.
+"
+        "✗ НЕ пиши про ID/score/trust/техподробности системы.
+"
     )
-    user = f"Вопрос: {question}\n\nОтзывы (JSON):\n{json.dumps(ctx, ensure_ascii=False)}"
-    return llm_generate([{"role": "system", "content": system}, {"role": "user", "content": user}], llm_cfg)
+
+    user = (
+        f"Вопрос: {question}
+
+"
+        f"Товар (метаданные JSON):
+{json.dumps(product_meta, ensure_ascii=False)}
+
+"
+        f"Отзывы (JSON):
+{json.dumps(ctx, ensure_ascii=False)}"
+    )
+
+    return llm_generate(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        llm_cfg
+    )
+
 
 
 def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]], llm_cfg: LLMProviderConfig,
@@ -1919,7 +1959,25 @@ def rag_build_from_bundle(bundle_path: Path, rag_dir: Path, emb_model: str, emb_
         rr["_row"] = i
         meta_rows.append(rr)
 
-    write_json(rag_dir / "meta.json", {"dim": int(embs.shape[1]), "count": int(embs.shape[0]), "bundle": str(bundle_path)})
+        # Store small product metadata for chat answers (so chat can talk about the product, not only reviews)
+    input_obj = summary.get("input", {}) or {} if isinstance(summary, dict) else {}
+    prod = input_obj.get("product", {}) or {} if isinstance(input_obj, dict) else {}
+    meta_payload = {
+        "dim": int(embs.shape[1]),
+        "count": int(embs.shape[0]),
+        "bundle": str(bundle_path),
+        "service": _safe_str(input_obj.get("service")) if isinstance(input_obj, dict) else "",
+        "url": _safe_str(input_obj.get("url")) if isinstance(input_obj, dict) else "",
+        "product": {
+            "name": prod.get("name"),
+            "brand": prod.get("brand"),
+            "description": prod.get("description"),
+            "category": prod.get("category"),
+            # optional: backend may add "specs" later
+            "specs": prod.get("specs"),
+        },
+    }
+    write_json(rag_dir / "meta.json", meta_payload)
     write_jsonl(rag_dir / "meta.jsonl", meta_rows)
 
     eprint(f"OK: built index with {len(meta_rows)} docs, dim={embs.shape[1]} -> {rag_dir}")
@@ -1950,7 +2008,17 @@ def ask_with_rag(rag_dir: Path, question: str, emb_model: str, emb_batch: int,
 
     ranked = retrieve(question, idx, meta, emb_cfg, top_k=top_k, rerank_k=rerank_k)
     ctx = format_context(ranked, max_chars_each=max_chars_each)
-    answer = rag_answer(question, ctx, llm_cfg)
+    product_meta = meta_info.get("product", {}) if isinstance(meta_info, dict) else {}
+    product_meta = {
+        "source_service": meta_info.get("service"),
+        "url": meta_info.get("url"),
+        "name": (product_meta or {}).get("name"),
+        "brand": (product_meta or {}).get("brand"),
+        "description": (product_meta or {}).get("description"),
+        "category": (product_meta or {}).get("category"),
+        "specs": (product_meta or {}).get("specs"),
+    }
+    answer = rag_answer(question, ctx, llm_cfg, product_meta=product_meta)
     return answer, ctx
 
 
