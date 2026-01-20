@@ -791,6 +791,21 @@ def wb_host_resolves(host: str) -> bool:
         return False
 
 
+def wb_crc16_arc(num: int) -> int:
+    t = num.to_bytes(8, byteorder="little", signed=False)
+    n = 0
+    for b in t:
+        n ^= b
+        for _ in range(8):
+            n = (n >> 1) ^ 0xA001 if (n & 1) else (n >> 1)
+    return n
+
+
+def wb_feedbacks_partition_host(imt_id: int) -> str:
+    partition = "2" if (wb_crc16_arc(int(imt_id)) % 100) >= 50 else "1"
+    return f"feedbacks{partition}.wb.ru"
+
+
 def wb_simplify_review(r: Dict[str, Any]) -> Dict[str, Any]:
     rating = safe_int(r.get("productValuation", r.get("rating")))
     user = ""
@@ -818,7 +833,11 @@ def fetch_wb_reviews(
     fb_to: int,
     debug: bool,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Fetch WB reviews and product info. Returns (reviews, product_info)."""
+    """Fetch WB reviews and product info. Returns (reviews, product_info).
+
+    NOTE: feedbacks/v1 typically returns only the newest ~1000 reviews and
+    ignores deeper pagination, so we cap at 1000 and don't chase more.
+    """
     nm_id = wb_parse_nm_id(url)
     eprint(f"[wb] nmId={nm_id}")
 
@@ -830,7 +849,11 @@ def fetch_wb_reviews(
     if product_info.get("name"):
         eprint(f"[wb] product: {product_info.get('brand', '')} - {product_info['name']}")
 
-    candidates = [f"feedbacks{i}.wb.ru" for i in range(int(fb_from), int(fb_to) + 1)]
+    partition_host = wb_feedbacks_partition_host(imt_id)
+    candidates = [partition_host] + [
+        f"feedbacks{i}.wb.ru" for i in range(int(fb_from), int(fb_to) + 1)
+        if f"feedbacks{i}.wb.ru" != partition_host
+    ]
     good_hosts = [h for h in candidates if wb_host_resolves(h)]
     if debug:
         eprint(f"[wb] dns candidates={candidates}")
@@ -846,6 +869,7 @@ def fetch_wb_reviews(
 
     skip = 0
     no_progress = 0
+    max_total = 1000
     pbar = tqdm(total=None, unit="rev", desc="reviews", disable=False)
 
     while True:
@@ -877,6 +901,7 @@ def fetch_wb_reviews(
             break
 
         added_this = 0
+        reached_cap = False
         for r in fb:
             if safe_int(r.get("nmId")) is not None and int(r.get("nmId")) != int(nm_id):
                 continue
@@ -901,6 +926,9 @@ def fetch_wb_reviews(
             if not sampling_mode:
                 rows.append(row)
                 added_this += 1
+                if len(rows) >= max_total:
+                    reached_cap = True
+                    break
                 if len(rows) > threshold_total:
                     sampling_mode = True
                     buckets = seed_buckets_from_rows(rows, per_rating)
@@ -911,6 +939,11 @@ def fetch_wb_reviews(
                 if rt in buckets and len(buckets[rt]) < per_rating:
                     buckets[rt].append(row)
                     added_this += 1
+
+        if reached_cap:
+            eprint(f"[wb] cap reached: {max_total} newest reviews")
+            pbar.update(added_this)
+            break
 
         if debug:
             eprint(f"[wb] skip={skip} fetched={len(fb)} kept={added_this} total={len(rows) if not sampling_mode else sum(len(v) for v in (buckets or {}).values())}")
@@ -960,6 +993,21 @@ def combined_text(r: Dict[str, Any]) -> str:
     c = norm_space(r.get("cons") or "")
     parts = [x for x in [t, f"Плюсы: {p}" if p else "", f"Минусы: {c}" if c else ""] if x]
     return " ".join(parts).strip()
+
+
+def rating_only_note(rating_stats: Dict[str, Any], diff_thr: float = 0.5) -> Optional[str]:
+    try:
+        text_avg = rating_stats.get("text_avg")
+        no_text_avg = rating_stats.get("no_text_avg")
+        share = rating_stats.get("no_text_share")
+        if text_avg is None or no_text_avg is None or share is None:
+            return None
+        if float(no_text_avg) - float(text_avg) < diff_thr:
+            return None
+        pct = round(float(share) * 100.0, 1)
+        return f"{pct}% оценок без текста, их средняя оценка {float(no_text_avg):.2f}"
+    except Exception:
+        return None
 
 
 def count_alpha_num(s: str) -> int:
@@ -1291,9 +1339,27 @@ def stage3_build_bundle(
     kept_meta: List[Dict[str, Any]] = []
     texts: List[str] = []
     hashes: List[str] = []
+    raw_with_text = 0
+    raw_no_text = 0
+    text_rating_sum = 0
+    text_rating_count = 0
+    no_text_rating_sum = 0
+    no_text_rating_count = 0
 
     for r in rows:
         txt = combined_text(r)
+        if txt.strip():
+            raw_with_text += 1
+            rt = safe_int(r.get("rating"))
+            if rt is not None:
+                text_rating_sum += int(rt)
+                text_rating_count += 1
+        else:
+            raw_no_text += 1
+            rt = safe_int(r.get("rating"))
+            if rt is not None:
+                no_text_rating_sum += int(rt)
+                no_text_rating_count += 1
         if min_len and len(txt) < min_len:
             continue
         if min_alpha and count_alpha_num(txt) < min_alpha:
@@ -1308,7 +1374,7 @@ def stage3_build_bundle(
     # Жесткий лимит для Railway: максимум 150 отзывов по умолчанию
     # Это дает ~4-5 секунд инференса вместо 20+
     try:
-        max_n = int(os.getenv("RS_MAX_REVIEWS_MODEL", "150") or "150")
+        max_n = int(os.getenv("RS_MAX_REVIEWS_MODEL", "1000") or "1000")
     except Exception:
         max_n = 150
     if max_n and len(texts) > max_n:
@@ -1451,6 +1517,14 @@ def stage3_build_bundle(
         r["rank"] = i
         r["trust_percentile"] = float(1.0 - (i - 1) / max(1, len(ranked) - 1))
 
+    rating_stats = {
+        "text_avg": (text_rating_sum / text_rating_count) if text_rating_count else None,
+        "no_text_avg": (no_text_rating_sum / no_text_rating_count) if no_text_rating_count else None,
+        "no_text_share": (raw_no_text / max(1, len(rows))),
+        "text_count": int(text_rating_count),
+        "no_text_count": int(no_text_rating_count),
+    }
+
     summary = {
         "input": {
             "url": url,
@@ -1468,7 +1542,13 @@ def stage3_build_bundle(
             "filter": {"min_len": min_len, "min_alpha": min_alpha},
             "models": {"sent_model": sent_model_dir, "rate_model": rate_model_dir},
         },
-        "counts": {"raw": int(len(rows)), "kept": int(len(df))},
+        "counts": {
+            "raw": int(len(rows)),
+            "kept": int(len(df)),
+            "raw_with_text": int(raw_with_text),
+            "raw_no_text": int(raw_no_text),
+        },
+        "rating": rating_stats,
         "stars": {"avg_orig": avg_orig, "truth_stars": truth_stars, "polarity_share": polarity_share},
         "trust": {
             "suspicious_share": suspicious_share,
@@ -1785,6 +1865,10 @@ def rag_answer(question: str, ctx: List[Dict[str, Any]], llm_cfg: LLMProviderCon
         "✓ Если есть противоречия между описанием и отзывами — покажи обе стороны.\n"
         "✗ НЕ пиши про ID/score/trust/техподробности системы.\n"
     )
+    system += (
+        "\nЕсли rating.no_text_avg заметно выше rating.text_avg (разница >= 0.5), "
+        "упомяни: \"X% оценок без текста, их средняя оценка Y\".\n"
+    )
 
     user = (
         f"Вопрос: {question}\n\n"
@@ -1842,6 +1926,7 @@ def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]]
         "product_description": product_info.get("description"),
         "product_category": product_info.get("category"),
         "counts": summary_obj.get("counts"),
+        "rating": summary_obj.get("rating"),
         "truth_stars": truth_stars,
         "suspicious_share": susp,
     }
@@ -1907,6 +1992,9 @@ def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]]
     out["notes"]["suspicious_share"] = susp
     out["notes"]["truth_stars"] = truth_stars
     out["notes"]["data"] = meta
+    rating_note = rating_only_note(meta.get("rating") or {})
+    if rating_note:
+        out["notes"]["rating_only"] = rating_note
     return out
 
 
@@ -1938,6 +2026,7 @@ def rag_build_from_bundle(bundle_path: Path, rag_dir: Path, emb_model: str, emb_
         "bundle": str(bundle_path),
         "service": _safe_str(input_obj.get("service")) if isinstance(input_obj, dict) else "",
         "url": _safe_str(input_obj.get("url")) if isinstance(input_obj, dict) else "",
+        "rating": summary.get("rating"),
         "product": {
             "name": prod.get("name"),
             "brand": prod.get("brand"),
@@ -1987,6 +2076,7 @@ def ask_with_rag(rag_dir: Path, question: str, emb_model: str, emb_batch: int,
         "description": (product_meta or {}).get("description"),
         "category": (product_meta or {}).get("category"),
         "specs": (product_meta or {}).get("specs"),
+        "rating": meta_info.get("rating"),
     }
     answer = rag_answer(question, ctx, llm_cfg, product_meta=product_meta)
     return answer, ctx
