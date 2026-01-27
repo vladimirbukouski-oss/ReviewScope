@@ -688,6 +688,48 @@ async def get_reviews(session_id: str, skip: int = 0, limit: int = 20, sort_by: 
         "reviews": formatted
     }
 
+
+@app.get("/questions/{session_id}")
+async def get_questions(session_id: str):
+    """Get questions for a product analysis"""
+    if session_id not in sessions:
+        raise HTTPException(404, "Сессия не найдена")
+
+    sess = sessions[session_id]
+
+    if sess["status"] != "ready":
+        raise HTTPException(400, "Анализ не завершен")
+
+    # Load bundle to get questions
+    bundle_path = sess.get("bundle_path")
+    if not bundle_path:
+        raise HTTPException(404, "Bundle не найден")
+
+    try:
+        from reviewscope_all import load_stage3_bundle
+        summary, reviews, questions = load_stage3_bundle(Path(bundle_path))
+    except Exception as e:
+        raise HTTPException(500, f"Ошибка загрузки bundle: {e}")
+
+    # Format questions for frontend
+    formatted_questions = []
+    for q in questions:
+        formatted_questions.append({
+            "id": q.get("id", ""),
+            "user": q.get("user", "Аноним") or "Аноним",
+            "text": q.get("text", ""),
+            "created": q.get("created", "")[:10] if q.get("created") else "",
+            "answer": q.get("answer", ""),
+            "answer_user": q.get("answer_user", "") or "Продавец",
+            "answer_date": q.get("answer_date", "")[:10] if q.get("answer_date") else "",
+        })
+
+    return {
+        "total": len(formatted_questions),
+        "questions": formatted_questions
+    }
+
+
 @app.get("/sessions")
 async def list_sessions():
     return {
@@ -698,7 +740,6 @@ async def list_sessions():
         }
         for sid, s in sessions.items()
     }
-
 
 @app.get("/reviews-stream/{session_id}")
 async def get_reviews_stream(session_id: str, last_seen: int = 0):

@@ -977,6 +977,152 @@ def fetch_wb_reviews(
 
 
 # ============================================================
+# Fetch: Wildberries Questions
+# ============================================================
+
+QUESTIONS_PER_PAGE = 30
+QUESTIONS_URL = "https://questions.wildberries.ru/api/v1/questions"
+
+
+def wb_simplify_question(q: Dict[str, Any]) -> Dict[str, Any]:
+    """Simplify question object to match review format"""
+    # Get user name
+    user = ""
+    if isinstance(q.get("user"), dict):
+        user = (q["user"].get("name") or "").strip()
+    elif isinstance(q.get("userName"), str):
+        user = q.get("userName", "").strip()
+    
+    # Get question text
+    text = (q.get("text") or q.get("question") or "").strip()
+    
+    # Get answer if exists
+    answer = ""
+    answer_user = ""
+    answer_date = None
+    
+    if isinstance(q.get("answer"), dict):
+        answer_obj = q["answer"]
+        answer = (answer_obj.get("text") or "").strip()
+        if isinstance(answer_obj.get("user"), dict):
+            answer_user = answer_obj["user"].get("name", "").strip()
+        answer_date = answer_obj.get("createdDate") or answer_obj.get("created")
+    
+    return {
+        "id": q.get("id"),
+        "created": q.get("createdDate") or q.get("created"),
+        "user": user,
+        "text": text,
+        "answer": answer,
+        "answer_user": answer_user,
+        "answer_date": answer_date,
+        "type": "question",  # Mark as question type
+    }
+
+
+def fetch_wb_questions(
+    url: str,
+    min_len: int = 10,
+    debug: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Fetch WB questions and product info. Returns (questions, product_info)."""
+    
+    nm_id = wb_parse_nm_id(url)
+    eprint(f"[wb] nmId={nm_id}")
+    
+    s = requests.Session()
+    card = wb_fetch_card_json(s, nm_id, debug=debug)
+    imt_id = wb_extract_imt_id(card)
+    product_info = wb_extract_product_info(card)
+    eprint(f"[wb] imtId={imt_id}")
+    if product_info.get("name"):
+        eprint(f"[wb] product: {product_info.get('brand', '')} - {product_info['name']}")
+    
+    # First, get total count of questions
+    try:
+        count_params = {"imtId": imt_id, "onlyCount": True}
+        count_response = req_json(
+            QUESTIONS_URL,
+            params=count_params,
+            tries=2,
+            sleep_base=0.3,
+            timeout=(4.0, 15.0),
+            debug=debug,
+        )
+        total_questions = count_response.get("count", 0)
+        eprint(f"[wb] total questions: {total_questions}")
+    except Exception as e:
+        eprint(f"[wb] failed to get question count: {e}")
+        total_questions = 0
+    
+    if total_questions == 0:
+        eprint("[wb] no questions found")
+        return [], product_info
+    
+    # Calculate total pages
+    total_pages = (total_questions + QUESTIONS_PER_PAGE - 1) // QUESTIONS_PER_PAGE
+    eprint(f"[wb] fetching {total_questions} questions from {total_pages} pages")
+    
+    # Fetch all questions
+    rows: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    
+    for page in range(1, total_pages + 1):
+        skip = (page - 1) * QUESTIONS_PER_PAGE
+        
+        try:
+            params = {
+                "imtId": imt_id,
+                "skip": skip,
+                "take": QUESTIONS_PER_PAGE,
+            }
+            payload = req_json(
+                QUESTIONS_URL,
+                params=params,
+                tries=2,
+                sleep_base=0.4,
+                timeout=(4.0, 25.0),
+                debug=debug,
+            )
+            
+            questions = payload.get("questions", [])
+            if not questions:
+                eprint(f"[wb] page {page}: no questions, stopping")
+                break
+            
+            added_this = 0
+            for q in questions:
+                qid = q.get("id")
+                if qid is not None:
+                    if qid in seen_ids:
+                        continue
+                    seen_ids.add(qid)
+                
+                row = wb_simplify_question(q)
+                
+                # Filter by length
+                if min_len and len(row["text"]) < min_len:
+                    continue
+                
+                rows.append(row)
+                added_this += 1
+            
+            eprint(f"[wb] page {page}/{total_pages}: fetched {len(questions)} questions, kept {added_this}")
+            
+            # If we got fewer questions than requested, we're done
+            if len(questions) < QUESTIONS_PER_PAGE:
+                eprint(f"[wb] page {page}: got fewer questions than requested, stopping")
+                break
+            
+        except Exception as e:
+            eprint(f"[wb] error fetching page {page}: {e}")
+            continue
+    
+    eprint(f"[wb] collected {len(rows)} questions")
+    return rows, product_info
+
+
+# ============================================================
 # Stage3: scoring + trust
 # ============================================================
 
@@ -1311,6 +1457,7 @@ def stage3_build_bundle(
 
     # 1) fetch
     raw_path = out_dir / "reviews_raw.jsonl"
+    questions_path = out_dir / "questions_raw.jsonl"
     product_info: Dict[str, Any] = {}
     if service == "wb":
         rows, product_info = fetch_wb_reviews(
@@ -1324,6 +1471,14 @@ def stage3_build_bundle(
             fb_to=fb_to,
             debug=debug,
         )
+        # Also fetch questions for WB
+        questions, _ = fetch_wb_questions(
+            url=url,
+            min_len=10,  # Minimum length for questions
+            debug=debug,
+        )
+        write_jsonl(questions_path, questions)
+        eprint(f"[stage3] fetched {len(questions)} questions")
     else:
         rows, product_info = fetch_onliner_reviews(
             url=url,
@@ -1333,6 +1488,8 @@ def stage3_build_bundle(
             sleep_s=max(sleep_s, 0.4),
             debug=debug,
         )
+        # No questions for Onliner
+        questions = []
     write_jsonl(raw_path, rows)
 
     # 2) filter + dedupe hashes
@@ -1575,7 +1732,12 @@ def stage3_build_bundle(
 
     # Save bundle
     bundle_path = out_dir / "stage3_bundle.json"
-    write_json(bundle_path, {"summary": summary, "reviews": ranked})
+    # Add questions to bundle if available
+    bundle_data = {"summary": summary, "reviews": ranked}
+    if questions:
+        bundle_data["questions"] = questions
+        eprint(f"[stage3] added {len(questions)} questions to bundle")
+    write_json(bundle_path, bundle_data)
 
     eprint(f"[ok] raw={len(rows)} kept={len(df)} truth_stars={truth_stars:.3f} suspicious_share={suspicious_share:.3f}")
     eprint(f"[saved] {bundle_path}")
@@ -1709,6 +1871,7 @@ def load_stage3_bundle(bundle_path: Path) -> Tuple[Dict[str, Any], List[Dict[str
     bundle = read_json(bundle_path)
     summary = bundle.get("summary", {}) if isinstance(bundle, dict) else {}
     reviews = bundle.get("reviews", []) if isinstance(bundle, dict) else []
+    questions = bundle.get("questions", []) if isinstance(bundle, dict) else []
     if not isinstance(reviews, list):
         raise ValueError("stage3_bundle.json: bundle['reviews'] must be a list")
 
@@ -1723,10 +1886,10 @@ def load_stage3_bundle(bundle_path: Path) -> Tuple[Dict[str, Any], List[Dict[str
             rr["text"] = _normalize_text(rr.get("text"))
             rr["source_service"] = _safe_str(rr.get("source_service") or rr.get("service") or rr.get("source") or "")
             uniq[key] = rr
-
+    
     out = list(uniq.values())
     out.sort(key=lambda x: float(x.get("trust", 0.0) or 0.0), reverse=True)
-    return summary, out
+    return summary, out, questions
 
 
 def suspicious_share_from_summary(summary: Dict[str, Any]) -> Optional[float]:
@@ -2000,11 +2163,33 @@ def summarize_product(summary_obj: Dict[str, Any], reviews: List[Dict[str, Any]]
 
 def rag_build_from_bundle(bundle_path: Path, rag_dir: Path, emb_model: str, emb_batch: int) -> None:
     rag_dir.mkdir(parents=True, exist_ok=True)
-    summary, reviews = load_stage3_bundle(bundle_path)
+    summary, reviews, questions = load_stage3_bundle(bundle_path)
     if not reviews:
         raise RuntimeError("No reviews in bundle")
 
-    texts = [r["text"] for r in reviews]
+    # Combine reviews and questions for RAG index
+    all_docs = []
+    meta_rows = []
+    
+    # Add reviews
+    for i, r in enumerate(reviews):
+        rr = dict(r)
+        rr["_row"] = i
+        rr["type"] = "review"  # Mark as review type
+        meta_rows.append(rr)
+        all_docs.append(r["text"])
+    
+    # Add questions if available
+    if questions:
+        for i, q in enumerate(questions):
+            qr = dict(q)
+            qr["_row"] = len(meta_rows) + i
+            qr["type"] = "question"  # Mark as question type
+            meta_rows.append(qr)
+            all_docs.append(q["text"])
+        eprint(f"[rag] added {len(questions)} questions to index")
+    
+    texts = all_docs
     emb_cfg = EmbeddingProviderConfig(model=emb_model, batch_size=emb_batch)
     embs = embed_texts(texts, emb_cfg)
 
