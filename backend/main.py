@@ -397,7 +397,7 @@ async def run_analysis(session_id: str, url: str):
         update_analysis_status(session_id, "summarizing", 80, "Генерируем AI-сводку...")
 
         # Stage 4: Summarize
-        summary_obj, reviews = rs.load_stage3_bundle(bundle_path)
+        summary_obj, reviews, questions = rs.load_stage3_bundle(bundle_path)
         llm_cfg = rs.LLMProviderConfig(provider=LLM_PROVIDER, model=LLM_MODEL, temperature=0.2)
 
         stage4_summary = await loop.run_in_executor(
