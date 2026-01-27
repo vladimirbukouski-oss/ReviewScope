@@ -647,15 +647,36 @@ async def chat(session_id: str, req: ChatRequest):
 
     evidence = []
     for item in ctx[:5]:
-        evidence.append({
-            "id": str(item.get("id", "")),
-            "user": "Покупатель",
-            "rating": int(item.get("orig_star", 0) or item.get("pred_star_hard", 3)),
-            "trust": round(float(item.get("trust", 0.5)), 3),
-            "text": item.get("text", "")[:300],
-            "created": str(item.get("created", ""))[:10],
-            "sentiment": "pos" if (item.get("pred_star_hard", 3) or 3) >= 4 else "neg" if (item.get("pred_star_hard", 3) or 3) <= 2 else "neu"
-        })
+        item_type = item.get("type", "review")
+        
+        if item_type == "question":
+            # Handle questions
+            evidence.append({
+                "id": str(item.get("id", "")),
+                "user": item.get("user", "Покупатель"),
+                "rating": None,  # Questions don't have ratings
+                "trust": None,  # Questions don't have trust scores
+                "text": item.get("text", "")[:300],
+                "created": str(item.get("created", ""))[:10],
+                "sentiment": "neu",  # Questions are neutral
+                "answer": item.get("answer", "")[:300],
+                "answer_user": item.get("answer_user", ""),
+                "answer_date": str(item.get("answer_date", ""))[:10] if item.get("answer_date") else "",
+                "type": "question"
+            })
+        else:
+            # Handle reviews
+            rating = item.get("orig_star") or item.get("pred_star_hard")
+            evidence.append({
+                "id": str(item.get("id", "")),
+                "user": "Покупатель",
+                "rating": int(rating) if rating is not None else None,
+                "trust": round(float(item.get("trust", 0.5)), 3),
+                "text": item.get("text", "")[:300],
+                "created": str(item.get("created", ""))[:10],
+                "sentiment": "pos" if (rating or 3) >= 4 else "neg" if (rating or 3) <= 2 else "neu",
+                "type": "review"
+            })
 
     return ChatResponse(answer=answer, evidence=evidence)
 
