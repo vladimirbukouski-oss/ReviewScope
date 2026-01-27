@@ -2198,13 +2198,7 @@ def rag_build_from_bundle(bundle_path: Path, rag_dir: Path, emb_model: str, emb_
     idx = build_index(embs, IndexConfig())
     save_index(idx, rag_dir / "hnsw.index")
 
-    meta_rows = []
-    for i, r in enumerate(reviews):
-        rr = dict(r)
-        rr["_row"] = i
-        meta_rows.append(rr)
-
-        # Store small product metadata for chat answers (so chat can talk about the product, not only reviews)
+    # Store small product metadata for chat answers (so chat can talk about the product, not only reviews)
     input_obj = summary.get("input", {}) or {} if isinstance(summary, dict) else {}
     prod = input_obj.get("product", {}) or {} if isinstance(input_obj, dict) else {}
     meta_payload = {
