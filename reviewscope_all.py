@@ -1042,6 +1042,7 @@ def fetch_wb_questions(
     try:
         count_params = {"imtId": imt_id, "onlyCount": True}
         count_response = req_json(
+            s,
             QUESTIONS_URL,
             params=count_params,
             tries=2,
@@ -1077,6 +1078,7 @@ def fetch_wb_questions(
                 "take": QUESTIONS_PER_PAGE,
             }
             payload = req_json(
+                s,
                 QUESTIONS_URL,
                 params=params,
                 tries=2,
